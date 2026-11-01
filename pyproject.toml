@@ -1,0 +1,39 @@
+[project]
+name = "proof-of-review"
+version = "0.1.0"
+description = "Proof of Review: a HITL assurance platform that proves human review actually happened."
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "sqlalchemy>=2.0.30",
+    "alembic>=1.13",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "python-multipart>=0.0.9",
+    "python-docx>=1.1",
+    "python-pptx>=0.6.23",
+    "pymupdf>=1.24",
+    "charset-normalizer>=3.3",
+    "httpx>=0.27",
+    "pyjwt[crypto]>=2.8",
+    "mcp>=2.0",
+]
+
+[project.optional-dependencies]
+postgres = ["psycopg[binary]>=3.1"]
+redis = ["redis>=5.0"]
+s3 = ["boto3>=1.34"]
+agents = ["agno>=1.5", "anthropic>=0.40"]
+all = ["psycopg[binary]>=3.1", "redis>=5.0", "boto3>=1.34", "agno>=1.5", "anthropic>=0.40"]
+
+[dependency-groups]
+dev = ["pytest>=8.2", "pytest-asyncio>=0.23"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+asyncio_mode = "auto"
+
+[tool.setuptools]
+packages = []

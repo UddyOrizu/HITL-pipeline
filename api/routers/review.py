@@ -1,0 +1,121 @@
+"""Reviewer workspace API: queues, review copy, flags, comments, decisions and telemetry."""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
+
+from api.deps import UserPrincipal, get_db, request_channel, require_roles
+from db.models import ReviewTask
+from services import review, telemetry
+from services.review import ReviewError
+
+router = APIRouter(prefix="/v1", tags=["reviewer"])
+
+reviewer = require_roles("reviewer")
+
+STATUS = {"not_found": 404, "conflict": 409, "mandatory_flags": 409, "confirm_required": 409,
+          "below_review_standard": 409, "channel_not_allowed": 403, "invalid": 422}
+
+
+def _raise(exc: ReviewError):
+    raise HTTPException(STATUS.get(exc.code, 422), {"code": exc.code, "message": str(exc), **exc.details}) from None
+
+
+@router.get("/review/queue")
+def get_queue(kind: str | None = Query(None, pattern="^(primary|spot_check)$"), p: UserPrincipal = Depends(reviewer),
+              db: Session = Depends(get_db)):
+    return review.queue(db, p.user, kind)
+
+
+@router.get("/review/history")
+def get_history(p: UserPrincipal = Depends(reviewer), db: Session = Depends(get_db)):
+    """A reviewer's own decisions, telemetry and canary results: reviewers can always see their own data."""
+    return review.history(db, p.user)
+
+
+@router.get("/review/tasks/{task_id}")
+def get_task(task_id: str, p: UserPrincipal = Depends(reviewer), db: Session = Depends(get_db)):
+    try:
+        return review.task_view(db, p.user, task_id)
+    except ReviewError as exc:
+        _raise(exc)
+
+
+@router.post("/review/tasks/{task_id}/flags/{flag_id}/open")
+def open_flag(task_id: str, flag_id: str, p: UserPrincipal = Depends(reviewer), db: Session = Depends(get_db)):
+    try:
+        return review.open_flag(db, p.user, task_id, flag_id)
+    except ReviewError as exc:
+        _raise(exc)
+
+
+@router.post("/review/tasks/{task_id}/flags/{flag_id}/acknowledge")
+def ack_flag(task_id: str, flag_id: str, p: UserPrincipal = Depends(reviewer), db: Session = Depends(get_db)):
+    try:
+        return review.acknowledge_flag(db, p.user, task_id, flag_id)
+    except ReviewError as exc:
+        _raise(exc)
+
+
+class CommentIn(BaseModel):
+    span_id: str | None = None
+    body: str = ""
+    kind: str = "comment"
+    suggested_text: str | None = None
+
+
+@router.post("/review/tasks/{task_id}/comments", status_code=201)
+def add_comment(task_id: str, body: CommentIn, p: UserPrincipal = Depends(reviewer), db: Session = Depends(get_db)):
+    try:
+        c = review.add_comment(db, p.user, task_id, body.span_id, body.body, body.kind, body.suggested_text)
+    except ReviewError as exc:
+        _raise(exc)
+    return {"id": c.id, "span_id": c.span_id, "kind": c.kind, "body": c.body, "suggested_text": c.suggested_text,
+            "created_at": c.created_at.isoformat() + "Z"}
+
+
+@router.delete("/review/tasks/{task_id}/comments/{comment_id}", status_code=204)
+def delete_comment(task_id: str, comment_id: str, p: UserPrincipal = Depends(reviewer), db: Session = Depends(get_db)):
+    try:
+        review.delete_comment(db, p.user, task_id, comment_id)
+    except ReviewError as exc:
+        _raise(exc)
+
+
+class DecisionIn(BaseModel):
+    outcome: str
+    reason: str = ""
+    cited_span_ids: list[str] = Field(default_factory=list)
+    confirm_warnings: bool = False
+
+
+@router.post("/review/tasks/{task_id}/decision")
+def decide(task_id: str, body: DecisionIn, request: Request, p: UserPrincipal = Depends(reviewer), db: Session = Depends(get_db)):
+    """Record a decision. Works from the web app, the API and the MCP server. Send X-PoR-Channel to label the
+    client; API and MCP decisions carry no reading telemetry, so the workflow's reading standard applies to them."""
+    try:
+        result = review.submit_decision(db, p.user, task_id, body.outcome, body.reason, body.cited_span_ids,
+                                        body.confirm_warnings, channel=request_channel(request))
+    except ReviewError as exc:
+        db.rollback()
+        _raise(exc)
+    db.commit()
+    return result
+
+
+class TelemetryIn(BaseModel):
+    task_id: str
+    events: list[dict] = Field(default_factory=list, max_length=1000)
+
+
+@router.post("/telemetry", status_code=202)
+def post_telemetry(body: TelemetryIn, p: UserPrincipal = Depends(reviewer), db: Session = Depends(get_db)):
+    """Batched reviewer events, sent by the workspace every 5 seconds."""
+    task = db.get(ReviewTask, body.task_id)
+    if task is None or task.reviewer_id != p.user.id or task.tenant_id != p.tenant_id:
+        raise HTTPException(404, "task not found")
+    if task.status != "assigned":
+        return {"stored": 0, "ignored": len(body.events), "reason": "task closed"}
+    return {"stored": telemetry.ingest(db, task, body.events)}
