@@ -92,3 +92,72 @@ export function RoleBadge({ role }: { role: string }) {
   const info = ROLE_INFO[role];
   return <Badge tone={info?.tone}>{info?.name || label(role)}</Badge>;
 }
+
+// --- Shared helpers for paged lists, dialogs, money and dates ---------------------------------------------
+
+export function Pager({ offset, limit, total, onChange }: { offset: number; limit: number; total: number; onChange: (offset: number) => void }) {
+  if (total <= limit && offset === 0) return null;
+  const from = total ? offset + 1 : 0;
+  const to = Math.min(offset + limit, total);
+  return (
+    <nav className="pager" aria-label="Pages">
+      <span className="sub">{from}–{to} of {total}</span>
+      <button className="btn small" disabled={offset === 0} onClick={() => onChange(Math.max(0, offset - limit))}>Previous</button>
+      <button className="btn small" disabled={to >= total} onClick={() => onChange(offset + limit)}>Next</button>
+    </nav>
+  );
+}
+
+export function Modal({ title, onClose, children, width = 520 }: { title: string; onClose: () => void; children: ReactNode; width?: number }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div className="modal-back" onClick={onClose}>
+      <div className="modal" role="dialog" aria-modal="true" aria-label={title} style={{ maxWidth: width }}
+        onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <h2 style={{ margin: 0 }}>{title}</h2>
+          <button className="btn small" onClick={onClose} aria-label="Close">✕</button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+export function useDebounced<T>(value: T, ms = 300): T {
+  const [v, setV] = useState(value);
+  useEffect(() => {
+    const id = setTimeout(() => setV(value), ms);
+    return () => clearTimeout(id);
+  }, [value, ms]);
+  return v;
+}
+
+export function money(v: number | null | undefined, currency = "USD", digits?: number) {
+  if (v == null) return "–";
+  const small = Math.abs(v) > 0 && Math.abs(v) < 1;
+  return new Intl.NumberFormat(undefined, {
+    style: "currency", currency,
+    minimumFractionDigits: digits ?? (small ? 4 : 2), maximumFractionDigits: digits ?? (small ? 4 : 2),
+  }).format(v);
+}
+
+export function num(v: number | null | undefined, digits = 0) {
+  return v == null ? "–" : new Intl.NumberFormat(undefined, { maximumFractionDigits: digits }).format(v);
+}
+
+// yyyy-mm-dd for date inputs (local date).
+export function isoDate(d: Date) {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+export function daysAgo(n: number) {
+  const d = new Date();
+  d.setDate(d.getDate() - n);
+  return isoDate(d);
+}

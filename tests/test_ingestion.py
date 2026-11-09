@@ -107,7 +107,7 @@ def test_legacy_ppt_is_converted_via_libreoffice(client, monkeypatch):
     assert any(s[0] == "slide" for s in spans_of(r.json()["id"]))
 
 
-def test_ppt_without_converter_is_deferred_not_lost(client, sink, monkeypatch):
+def test_ppt_without_converter_is_retried_then_deferred_not_lost(client, sink, monkeypatch):
     monkeypatch.setenv("POR_SOFFICE_PATH", "definitely-not-installed-soffice")
     from services.config import get_settings
 
@@ -115,7 +115,22 @@ def test_ppt_without_converter_is_deferred_not_lost(client, sink, monkeypatch):
     world = make_tenant()
     r = upload(client, world, "old.ppt", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\0" * 512)
     assert r.status_code == 201
-    assert r.json()["status"] == "deferred"
+    # A missing converter may be temporary: the submission waits for a retry instead of failing at once.
+    assert r.json()["status"] == "received"
+
+    from db.models import Submission, utcnow
+    from db.session import session_scope
+    from services import scheduler
+
+    for _ in range(get_settings().processing_max_attempts - 1):
+        with session_scope() as db:
+            sub = db.get(Submission, r.json()["id"])
+            assert sub.retry_at is not None and "ConversionUnavailable" in sub.processing_error
+            sub.retry_at = utcnow()  # due now
+        scheduler.recover_submissions()
+    with session_scope() as db:
+        sub = db.get(Submission, r.json()["id"])
+        assert sub.status == "deferred" and sub.processing_attempts == get_settings().processing_max_attempts
     deferred = [e for e in sink.events() if e["event"] == "submission.deferred"]
     assert deferred and deferred[0]["data"]["reason"] == "processing_failed"
 

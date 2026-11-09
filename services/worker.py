@@ -1,6 +1,8 @@
-"""Background worker: consumes jobs and events from Redis Streams and runs periodic tasks.
+"""Background worker: consumes jobs and events from Redis Streams and runs the periodic tasks.
 
-Periodic: webhook retries, SLA escalation, assignment of queued items, SharePoint folder polling.
+- Jobs and event handlers that fail are retried with backoff, then moved to the dead-letter stream (por:dead).
+- Messages left pending by a crashed worker are reclaimed after a few minutes.
+- Periodic tasks (services/scheduler.py) take a lock, so several replicas can run safely.
 Run: python -m services.worker
 """
 
@@ -10,38 +12,15 @@ import json
 import logging
 import socket
 import time
+import uuid
 
-from sqlalchemy import select
-
-from db.models import ConnectorConfig
-from db.session import session_scope
-from services import jobs, webhooks, workflow
+from services import jobs, scheduler
 from services.config import get_settings
 
 log = logging.getLogger("por.worker")
 
 GROUP = "por-workers"
-
-
-def periodic() -> None:
-    try:
-        webhooks.retry_due()
-    except Exception:  # noqa: BLE001
-        log.exception("webhook retries failed")
-    try:
-        with session_scope() as s:
-            workflow.check_slas(s)
-            workflow.assign_pending(s)
-    except Exception:  # noqa: BLE001
-        log.exception("workflow tick failed")
-    try:
-        from connectors import sharepoint
-
-        with session_scope() as s:
-            for cfg in s.scalars(select(ConnectorConfig).where(ConnectorConfig.kind == "sharepoint", ConnectorConfig.active.is_(True))).all():
-                sharepoint.run_once(s, cfg)
-    except Exception:  # noqa: BLE001
-        log.exception("sharepoint polling failed")
+RECLAIM_IDLE_MS = 5 * 60 * 1000
 
 
 def _ensure_group(r, stream: str) -> None:
@@ -51,42 +30,74 @@ def _ensure_group(r, stream: str) -> None:
         pass
 
 
-def run_forever(interval: float = 15.0) -> None:
+def handle(r, stream: str, msg_id, fields: dict) -> None:
+    """Process one stream message; failures are scheduled for retry rather than lost."""
+    try:
+        if stream == jobs.JOB_STREAM:
+            try:
+                jobs.run(fields["name"], json.loads(fields["kwargs"]))
+            except Exception as exc:  # noqa: BLE001
+                log.exception("job %s failed", fields.get("name"))
+                jobs.retry_later(r, stream, fields, f"{type(exc).__name__}: {exc}")
+        else:
+            payload = json.loads(fields["payload"])
+            for name, exc in jobs.run_handlers(fields["event"], payload, only=fields.get("only")):
+                # Retry only the handler that failed, so the others are not run twice.
+                jobs.retry_later(r, stream, {**fields, "only": name}, f"{type(exc).__name__}: {exc}")
+    finally:
+        r.xack(stream, GROUP, msg_id)
+
+
+def _decode(fields: dict) -> dict:
+    return {(k.decode() if isinstance(k, bytes) else k): (v.decode() if isinstance(v, bytes) else v) for k, v in fields.items()}
+
+
+def reclaim(r, consumer: str) -> int:
+    """Take over messages another consumer read but never acknowledged (it crashed)."""
+    n = 0
+    for stream in (jobs.JOB_STREAM, jobs.EVENT_STREAM):
+        try:
+            res = r.xautoclaim(stream, GROUP, consumer, min_idle_time=RECLAIM_IDLE_MS, start_id="0-0", count=50)
+        except Exception:  # noqa: BLE001  (older Redis without XAUTOCLAIM)
+            continue
+        for msg_id, fields in (res[1] if len(res) > 1 else []):
+            if fields:
+                handle(r, stream, msg_id, _decode(fields))
+                n += 1
+    return n
+
+
+def run_forever() -> None:
     import connectors
 
     connectors.register()
     s = get_settings()
-    last = 0.0
+    interval = s.scheduler_interval_seconds
     if not s.redis_url:
         log.info("no POR_REDIS_URL: running periodic tasks only")
         while True:
-            periodic()
+            scheduler.periodic()
             time.sleep(interval)
     r = jobs._redis()
-    consumer = f"{socket.gethostname()}-{id(r)}"
+    consumer = f"{socket.gethostname()}-{uuid.uuid4().hex[:8]}"
     for stream in (jobs.JOB_STREAM, jobs.EVENT_STREAM):
         _ensure_group(r, stream)
+    last = 0.0
     while True:
         if time.monotonic() - last > interval:
-            periodic()
+            scheduler.periodic()
+            jobs.release_delayed(r)
+            reclaim(r, consumer)
             last = time.monotonic()
         batches = r.xreadgroup(GROUP, consumer, {jobs.JOB_STREAM: ">", jobs.EVENT_STREAM: ">"}, count=10, block=5000) or []
         for stream, messages in batches:
             stream = stream.decode() if isinstance(stream, bytes) else stream
             for msg_id, fields in messages:
-                f = {k.decode(): v.decode() for k, v in fields.items()}
-                try:
-                    if stream == jobs.JOB_STREAM:
-                        jobs.run(f["name"], json.loads(f["kwargs"]))
-                    else:
-                        payload = json.loads(f["payload"])
-                        for handler in jobs._subscribers.get(f["event"], []):
-                            handler(payload)
-                except Exception:  # noqa: BLE001
-                    log.exception("failed processing %s %s", stream, msg_id)
-                r.xack(stream, GROUP, msg_id)
+                handle(r, stream, msg_id, _decode(fields))
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    from services.logging_setup import configure
+
+    configure()
     run_forever()

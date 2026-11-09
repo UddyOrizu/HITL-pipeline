@@ -3,36 +3,110 @@
 from __future__ import annotations
 
 import logging
+import time
+import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 
 import connectors
-from api.routers import auditor, auth, integrations, oversight, portal, review, submissions, users
+from api.routers import (
+    auditor,
+    auth,
+    integrations,
+    oversight,
+    platform,
+    portal,
+    reports,
+    review,
+    submissions,
+    tenant,
+    users,
+)
+from services import bootstrap, metrics, scheduler
 from services.config import get_settings
+from services.logging_setup import configure as configure_logging
+from services.logging_setup import request_id
 from services.outbound import CanaryLeakError
+from services.security import constant_time_equal
 from services.storage import get_storage, verify_file_signature
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+configure_logging()
 log = logging.getLogger("por.api")
 
+
+def check_production_settings() -> None:
+    """Refuse to start in prod with settings that would be unsafe there."""
+    s = get_settings()
+    if not s.is_prod:
+        return
+    if s.secret_key.startswith("dev-only-insecure"):
+        raise RuntimeError("POR_SECRET_KEY must be set in production")
+    if s.virus_scan_required and not s.clamav_host:
+        raise RuntimeError("POR_CLAMAV_HOST must be set in production (or POR_REQUIRE_VIRUS_SCAN=false to accept "
+                           "uploads without virus scanning)")
+    if "*" in s.cors_origin_list:
+        raise RuntimeError("POR_CORS_ORIGINS must list origins explicitly in production, not *")
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    check_production_settings()
+    # Create the initial admin from POR_BOOTSTRAP_ADMIN_* when set. Bad settings stop start-up loudly.
+    bootstrap.ensure_initial_admin()
+    if get_settings().run_scheduler_in_api:
+        scheduler.start_background()
+    yield
+    scheduler.stop_background()
+
+
 app = FastAPI(
+    lifespan=lifespan,
     title="Proof of Review",
-    version="0.1.0",
+    version="0.2.0",
     description="HITL assurance platform: routes content to human reviewers, measures how it was reviewed, "
     "and returns a decision with a Review Assurance Score and evidence trail.",
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Origins come from POR_CORS_ORIGINS. The bundled web app is same-origin (served by the API, or proxied by Vite),
+# so the default is none.
+_origins = get_settings().cors_origin_list
+if _origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_origins,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["X-Total-Count", "X-Next-Offset", "X-Request-ID", "Retry-After", "Content-Disposition"],
+    )
 
-for r in (auth, submissions, portal, review, oversight, users, auditor, integrations):
+
+@app.middleware("http")
+async def observe(request: Request, call_next):
+    """Request ids (X-Request-ID, also in every log line) and request metrics by route template."""
+    rid = request.headers.get("x-request-id") or uuid.uuid4().hex[:16]
+    token = request_id.set(rid)
+    start = time.perf_counter()
+    status = 500
+    try:
+        response = await call_next(request)
+        status = response.status_code
+        response.headers["X-Request-ID"] = rid
+        return response
+    finally:
+        route = request.scope.get("route")
+        path = getattr(route, "path", None) or "unmatched"
+        labels = {"method": request.method, "route": path, "status": str(status)}
+        metrics.inc("por_http_requests_total", labels)
+        metrics.observe("por_http_request_duration_seconds", time.perf_counter() - start,
+                        {"method": request.method, "route": path})
+        request_id.reset(token)
+
+
+for r in (auth, submissions, portal, review, oversight, users, tenant, platform, reports, auditor, integrations):
     app.include_router(r.router)
 
 connectors.register()
@@ -48,6 +122,33 @@ async def _canary_leak(request: Request, exc: CanaryLeakError):
 @app.get("/healthz")
 def healthz():
     return {"ok": True}
+
+
+@app.get("/readyz")
+def readyz():
+    """Ready to serve: the database answers."""
+    from sqlalchemy import text
+
+    from db.session import session_scope
+
+    try:
+        with session_scope() as s:
+            s.execute(text("SELECT 1"))
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": type(exc).__name__}, status_code=503)
+    return {"ok": True}
+
+
+@app.get("/metrics", include_in_schema=False)
+def prometheus_metrics(request: Request):
+    s = get_settings()
+    if not s.metrics_enabled:
+        raise HTTPException(404, "not found")
+    if s.metrics_token:
+        auth_header = request.headers.get("authorization", "")
+        if not constant_time_equal(auth_header, f"Bearer {s.metrics_token}"):
+            raise HTTPException(401, "metrics token required")
+    return PlainTextResponse(metrics.render(), media_type="text/plain; version=0.0.4")
 
 
 @app.get("/v1/files/{key:path}")
@@ -73,5 +174,4 @@ if _dist.exists():
         return FileResponse(_dist / "index.html")
 
 
-if get_settings().env == "prod" and get_settings().secret_key.startswith("dev-only-insecure"):
-    raise RuntimeError("POR_SECRET_KEY must be set in production")
+check_production_settings()

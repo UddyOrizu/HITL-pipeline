@@ -1,0 +1,61 @@
+/* Styles for the oversight and audit pages (held items, workflows, evidence, audit log, users). Prefixed ov- so
+   they don't collide with the shared stylesheet. */
+
+.ov-drawer-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.ov-drawer-head h2 { margin: 0 0 4px; font-size: 18px; }
+.ov-section { margin-top: 20px; }
+.ov-section > h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 8px; }
+.ov-badges { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+
+.ov-compare { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+.ov-review { border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: var(--surface); min-width: 0; }
+.ov-review.pending { border-style: dashed; }
+.ov-review .reason { background: var(--surface-2); border-radius: 6px; padding: 8px 10px; margin: 8px 0; font-size: 13px; white-space: pre-wrap; }
+.ov-review ul { margin: 6px 0 0; padding-left: 18px; font-size: 12px; color: var(--medium); }
+.ov-tele { display: grid; grid-template-columns: max-content 1fr; gap: 2px 10px; font-size: 12px; margin-top: 8px; }
+.ov-tele dt { color: var(--muted); }
+.ov-tele dd { margin: 0; }
+
+.ov-actions { border: 1px solid var(--border); border-radius: 10px; padding: 12px; background: var(--surface-2); }
+.ov-actions .btn-row + .ov-action-form { margin-top: 10px; }
+.ov-action-form { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+.ov-action-form label:first-child { margin-top: 0; }
+
+.ov-doc { border: 1px solid var(--border); border-radius: 8px; padding: 16px 18px; max-height: 420px; overflow-y: auto; font-family: var(--serif); font-size: 15px; line-height: 1.6; }
+.ov-doc-section + .ov-doc-section { margin-top: 14px; }
+.ov-doc p { margin: 0 0 8px; padding: 1px 4px; border-radius: 4px; white-space: pre-wrap; }
+.ov-doc p.heading, .ov-doc p.title { font-family: var(--font); font-weight: 700; }
+.ov-doc p.sev-high { background: var(--high-soft); box-shadow: inset 3px 0 0 var(--high); }
+.ov-doc p.sev-medium { background: var(--medium-soft); box-shadow: inset 3px 0 0 var(--medium); }
+.ov-doc p.sev-low { box-shadow: inset 3px 0 0 var(--low); }
+
+.ov-flag { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; margin-bottom: 6px; font-size: 13px; }
+.ov-quote { font-family: var(--serif); color: var(--muted); border-left: 3px solid var(--border); padding-left: 8px; margin-top: 4px; font-size: 13px; }
+
+.ov-score-table td, .ov-score-table th { padding: 4px 8px; font-size: 13px; }
+
+.ov-checks { display: flex; flex-wrap: wrap; gap: 4px 16px; }
+.ov-checks label.check { margin: 4px 0; }
+.ov-stage { display: grid; grid-template-columns: minmax(120px, 2fr) minmax(120px, 2fr) minmax(90px, 1fr) minmax(130px, 1.4fr) auto; gap: 8px; align-items: center; margin-bottom: 6px; }
+.ov-stage-head { font-size: 11px; color: var(--muted); font-weight: 600; margin-bottom: 2px; }
+.ov-history { background: var(--surface-2); }
+.ov-history ol { list-style: none; margin: 0; padding: 0; }
+.ov-history li { display: grid; grid-template-columns: 56px 150px 1fr; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.ov-history li:last-child { border-bottom: none; }
+
+.ov-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 0 0 14px; }
+.ov-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.ov-filters label { margin: 0 0 4px; }
+.ov-event td { font-size: 13px; }
+.ov-event .mono { word-break: break-all; }
+.ov-json { background: var(--surface-2); border-radius: 8px; padding: 10px 12px; overflow: auto; max-height: 360px; font-size: 12px; margin: 0; white-space: pre-wrap; word-break: break-word; }
+.ov-hash { font-size: 11px; color: var(--muted); margin-top: 6px; word-break: break-all; }
+
+.ov-readonly { display: flex; gap: 8px; align-items: center; }
+
+@media (max-width: 760px) {
+  .ov-stage { grid-template-columns: 1fr 1fr; }
+  .ov-stage-head { display: none; }
+  .ov-history li { grid-template-columns: 48px 1fr; }
+  .ov-history li > :last-child { grid-column: 1 / -1; }
+}

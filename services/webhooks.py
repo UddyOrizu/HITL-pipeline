@@ -15,13 +15,14 @@ from sqlalchemy.orm import Session
 
 from db.models import SourceApp, Submission, WebhookDelivery, new_id, utcnow
 from db.session import session_scope
-from services import audit, jobs, outbound
+from services import audit, jobs, metrics, netguard, outbound
 from services.config import get_settings
 from services.hooks import on_commit
 
 log = logging.getLogger("por.webhooks")
 
-EVENTS = {"submission.received", "submission.in_review", "submission.decided", "submission.deferred", "submission.escalated"}
+EVENTS = {"submission.received", "submission.in_review", "submission.decided", "submission.deferred", "submission.escalated",
+          "submission.cancelled"}
 
 _transport: httpx.BaseTransport | None = None
 
@@ -89,20 +90,32 @@ def _attempt(session: Session, d: WebhookDelivery) -> None:
         "X-PoR-Signature": sign(app.webhook_secret, int(time.time()), body),
     }
     d.attempts += 1
+    blocked = False
     try:
-        with httpx.Client(transport=_transport, timeout=get_settings().webhook_timeout_seconds) as client:
+        if not app.webhook_url:
+            raise netguard.UnsafeTarget("the source app no longer has a webhook URL")
+        netguard.check_url(app.webhook_url, resolve=_transport is None)
+        with httpx.Client(transport=_transport, timeout=get_settings().webhook_timeout_seconds,
+                          follow_redirects=False) as client:
             resp = client.post(app.webhook_url, content=body, headers=headers)
         d.last_status_code = resp.status_code
         ok = 200 <= resp.status_code < 300
         d.last_error = None if ok else resp.text[:500]
+    except netguard.UnsafeTarget as exc:
+        ok, blocked = False, True
+        d.last_status_code = None
+        d.last_error = f"blocked: {exc}"[:500]
     except httpx.HTTPError as exc:
         ok = False
         d.last_status_code = None
         d.last_error = str(exc)[:500]
+    metrics.inc("por_webhook_attempts_total", {"outcome": "delivered" if ok else ("blocked" if blocked else "failed")})
     now = utcnow()
     if ok:
         d.status = "delivered"
         d.delivered_at = now
+    elif blocked:
+        d.status = "failed"
     else:
         deadline = d.created_at + timedelta(hours=get_settings().webhook_retry_window_hours)
         nxt = now + timedelta(seconds=backoff_seconds(d.attempts))

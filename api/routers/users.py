@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from api.deps import ROLES, UserPrincipal, get_db, require_roles
 from db.models import AuditEvent, ReviewTask, Team, Tenant, User, utcnow
-from services import assignment, audit, canary, workflow
+from services import assignment, audit, canary, passwords, workflow
 
 router = APIRouter(prefix="/v1/admin", tags=["users"])
 
@@ -67,6 +67,10 @@ def user_out(u: User, db: Session | None = None) -> dict:
         "last_login_at": u.last_login_at.isoformat() if u.last_login_at else None,
         "created_at": u.created_at.isoformat() if u.created_at else None,
         "sso_linked": bool(u.oidc_subject),
+        "password_set": bool(u.password_hash),
+        "locked": bool(u.locked_until and u.locked_until > utcnow()),
+        "hourly_rate": u.hourly_rate,
+        "erased": bool(u.erased_at),
     }
     if db is not None:
         out["stats"] = _stats(db, u)
@@ -140,6 +144,16 @@ class UserIn(BaseModel):
     roles: list[str] = Field(default_factory=lambda: ["reviewer"])
     team_ids: list[str] = Field(default_factory=list)
     active: bool = True
+    # Optional initial password for sign-in without SSO. Leave out for SSO-only users.
+    password: str | None = Field(None, max_length=passwords.MAX_LENGTH)
+    hourly_rate: float | None = Field(None, ge=0)  # cost reports; falls back to the team, then the organisation
+
+
+def _check_password(password: str, email: str) -> None:
+    try:
+        passwords.check_policy(password, email)
+    except passwords.PasswordPolicyError as exc:
+        raise HTTPException(422, str(exc)) from None
 
 
 @router.post("/users", status_code=201)
@@ -149,13 +163,34 @@ def create_user(body: UserIn, p: UserPrincipal = Depends(admin), db: Session = D
         raise HTTPException(422, "enter a valid email address")
     roles = _check_roles(db, p.tenant_id, body.roles)
     team_ids = _check_teams(db, p.tenant_id, body.team_ids)
+    if body.password:
+        _check_password(body.password, email)
     if db.scalars(select(User).where(User.tenant_id == p.tenant_id, User.email == email)).first():
         raise HTTPException(409, "a user with this email already exists")
-    u = User(tenant_id=p.tenant_id, email=email, name=body.name.strip(), roles=roles, team_ids=team_ids, active=body.active)
+    u = User(tenant_id=p.tenant_id, email=email, name=body.name.strip(), roles=roles, team_ids=team_ids, active=body.active,
+             hourly_rate=body.hourly_rate)
+    if body.password:
+        u.password_hash, u.password_changed_at = passwords.hash_password(body.password), utcnow()
     db.add(u)
     db.flush()
     audit.record(db, p.tenant_id, _actor(p), "user.created", "user", u.id,
-                 {"email": u.email, "roles": roles, "team_ids": team_ids, "active": u.active})
+                 {"email": u.email, "roles": roles, "team_ids": team_ids, "active": u.active,
+                  "password_set": bool(body.password)})
+    return user_out(u, db)
+
+
+class PasswordIn(BaseModel):
+    password: str = Field(max_length=passwords.MAX_LENGTH)
+
+
+@router.put("/users/{user_id}/password")
+def set_user_password(user_id: str, body: PasswordIn, p: UserPrincipal = Depends(admin), db: Session = Depends(get_db)):
+    """Set or reset a user's password. Also unlocks the account and signs out their sessions."""
+    u = _get_user(db, p, user_id)
+    if u.id == p.user.id:
+        raise HTTPException(409, "change your own password from your account (it needs your current password)")
+    _check_password(body.password, u.email)
+    passwords.set_password(db, u, body.password, _actor(p), "admin")
     return user_out(u, db)
 
 
@@ -180,11 +215,14 @@ class UserUpdate(BaseModel):
     team_ids: list[str] | None = None
     active: bool | None = None
     email: str | None = None  # accepted for older clients; email is the sign-in identity and cannot change
+    hourly_rate: float | None = Field(None, ge=0)
 
 
 @router.put("/users/{user_id}")
 def update_user(user_id: str, body: UserUpdate, p: UserPrincipal = Depends(admin), db: Session = Depends(get_db)):
     u = _get_user(db, p, user_id)
+    if u.erased_at:
+        raise HTTPException(409, "this user's personal data has been erased; the account cannot be changed")
     if body.email is not None and body.email.strip().lower() != u.email:
         raise HTTPException(422, "email is the sign-in identity and cannot be changed; create a new user instead")
     roles = _check_roles(db, p.tenant_id, body.roles) if body.roles is not None else list(u.roles or [])
@@ -199,11 +237,14 @@ def update_user(user_id: str, body: UserUpdate, p: UserPrincipal = Depends(admin
 
     was_reviewer = u.active and "reviewer" in (u.roles or [])
     stops_reviewing = was_reviewer and ("reviewer" not in roles or not active)
-    before = {"name": u.name, "roles": list(u.roles or []), "team_ids": list(u.team_ids or []), "active": u.active}
+    before = {"name": u.name, "roles": list(u.roles or []), "team_ids": list(u.team_ids or []), "active": u.active,
+              "hourly_rate": u.hourly_rate}
     if body.name is not None:
         u.name = body.name.strip()
+    if "hourly_rate" in body.model_fields_set:
+        u.hourly_rate = body.hourly_rate
     u.roles, u.team_ids, u.active = roles, team_ids, active
-    after = {"name": u.name, "roles": roles, "team_ids": team_ids, "active": active}
+    after = {"name": u.name, "roles": roles, "team_ids": team_ids, "active": active, "hourly_rate": u.hourly_rate}
     changes = {k: {"from": before[k], "to": after[k]} for k in after if before[k] != after[k]}
     db.flush()
 
@@ -226,18 +267,52 @@ def update_user(user_id: str, body: UserUpdate, p: UserPrincipal = Depends(admin
     return out
 
 
+@router.post("/users/{user_id}/sign-out")
+def sign_out_user(user_id: str, p: UserPrincipal = Depends(admin), db: Session = Depends(get_db)):
+    """End every session the user has (e.g. a lost laptop). They can sign in again straight away."""
+    u = _get_user(db, p, user_id)
+    u.sessions_revoked_at = utcnow()
+    audit.record(db, p.tenant_id, _actor(p), "user.sessions_revoked", "user", u.id, {"by": "admin"})
+    return user_out(u, db)
+
+
+@router.post("/users/{user_id}/erase")
+def erase_user(user_id: str, p: UserPrincipal = Depends(admin), db: Session = Depends(get_db)):
+    """Remove a deactivated user's personal data (name, email, sign-in details) for an erasure request. Their
+    decisions stay, attributed to the anonymised account. Earlier audit entries are append-only and keep what they
+    recorded at the time."""
+    u = _get_user(db, p, user_id)
+    if u.id == p.user.id:
+        raise HTTPException(409, "you cannot erase your own account")
+    if u.active:
+        raise HTTPException(409, "deactivate the user first")
+    if u.erased_at:
+        return user_out(u, db)
+    u.name = "Erased user"
+    u.email = f"erased-{u.id}@erased.invalid"
+    u.password_hash = None
+    u.oidc_subject = None
+    u.hourly_rate = None
+    u.email_notifications = False
+    u.sessions_revoked_at = utcnow()
+    u.erased_at = utcnow()
+    audit.record(db, p.tenant_id, _actor(p), "user.erased", "user", u.id, {})
+    return user_out(u, db)
+
+
 # --- Teams ------------------------------------------------------------------------------
 
 
 class TeamIn(BaseModel):
     name: str
     daily_ceiling_minutes: int | None = Field(None, ge=1)
+    hourly_rate: float | None = Field(None, ge=0)
 
 
 def team_out(db: Session, t: Team) -> dict:
     members = [u for u in db.scalars(select(User).where(User.tenant_id == t.tenant_id, User.active.is_(True))).all()
                if t.id in (u.team_ids or [])]
-    return {"id": t.id, "name": t.name, "daily_ceiling_minutes": t.daily_ceiling_minutes,
+    return {"id": t.id, "name": t.name, "daily_ceiling_minutes": t.daily_ceiling_minutes, "hourly_rate": t.hourly_rate,
             "members": len(members), "reviewers": sum(1 for u in members if "reviewer" in (u.roles or []))}
 
 
@@ -253,11 +328,11 @@ def create_team(body: TeamIn, p: UserPrincipal = Depends(admin), db: Session = D
         raise HTTPException(422, "team name is required")
     if db.scalars(select(Team).where(Team.tenant_id == p.tenant_id, Team.name == name)).first():
         raise HTTPException(409, "a team with this name already exists")
-    t = Team(tenant_id=p.tenant_id, name=name, daily_ceiling_minutes=body.daily_ceiling_minutes)
+    t = Team(tenant_id=p.tenant_id, name=name, daily_ceiling_minutes=body.daily_ceiling_minutes, hourly_rate=body.hourly_rate)
     db.add(t)
     db.flush()
     audit.record(db, p.tenant_id, _actor(p), "team.created", "team", t.id,
-                 {"name": t.name, "daily_ceiling_minutes": t.daily_ceiling_minutes})
+                 {"name": t.name, "daily_ceiling_minutes": t.daily_ceiling_minutes, "hourly_rate": t.hourly_rate})
     return team_out(db, t)
 
 
@@ -272,7 +347,7 @@ def update_team(team_id: str, body: TeamIn, p: UserPrincipal = Depends(admin), d
     clash = db.scalars(select(Team).where(Team.tenant_id == p.tenant_id, Team.name == name, Team.id != t.id)).first()
     if clash:
         raise HTTPException(409, "a team with this name already exists")
-    t.name, t.daily_ceiling_minutes = name, body.daily_ceiling_minutes
+    t.name, t.daily_ceiling_minutes, t.hourly_rate = name, body.daily_ceiling_minutes, body.hourly_rate
     audit.record(db, p.tenant_id, _actor(p), "team.updated", "team", t.id,
-                 {"name": t.name, "daily_ceiling_minutes": t.daily_ceiling_minutes})
+                 {"name": t.name, "daily_ceiling_minutes": t.daily_ceiling_minutes, "hourly_rate": t.hourly_rate})
     return team_out(db, t)

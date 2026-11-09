@@ -3,7 +3,7 @@
 A monitored folder: documents dropped in are submitted; when decided, the decision is written back as
 list-item metadata and the file moves to an Approved or Rejected folder.
 
-Config keys: aad_tenant_id, client_id, client_secret, drive_id, workflow_id,
+Config keys: aad_tenant_id, client_id, client_secret (secret), drive_id, workflow_id,
              inbox_folder (default "Review/Inbox"), approved_folder ("Review/Approved"),
              rejected_folder ("Review/Rejected"), changes_folder ("Review/Changes requested"), risk_tier ("medium").
 """
@@ -16,7 +16,7 @@ from urllib.parse import quote
 
 from sqlalchemy.orm import Session
 
-from connectors.base import check, http, por_client
+from connectors.base import check, config_of, http, por_client
 from db.models import ConnectorConfig
 
 GRAPH = "https://graph.microsoft.com/v1.0"
@@ -26,7 +26,7 @@ SUPPORTED = (".txt", ".docx", ".pptx", ".ppt", ".pdf")
 class SharePointConnector:
     def __init__(self, cfg: ConnectorConfig):
         self.cfg = cfg
-        self.c = cfg.config or {}
+        self.c = config_of(cfg)
 
     def _token(self) -> str:
         with http() as client:

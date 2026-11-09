@@ -2,7 +2,7 @@
 
 Approve-from-queue links open the review workspace; the decision itself always happens there, where telemetry runs.
 
-Config keys: webhook_url (Teams Workflows / incoming webhook URL), app_base_url (reviewer web app),
+Config keys: webhook_url (secret: Teams Workflows / incoming webhook URL), app_base_url (reviewer web app),
              notify ("assigned,escalated,deferred" by default).
 """
 
@@ -12,9 +12,10 @@ import logging
 
 from sqlalchemy import select
 
-from connectors.base import check, http
+from connectors.base import check, checked_url, config_of, http
 from db.models import ConnectorConfig, Submission, User
 from db.session import session_scope
+from services.config import get_settings
 
 log = logging.getLogger("por.connectors.teams")
 
@@ -35,7 +36,7 @@ def _card(title: str, lines: list[str], url: str | None, button: str) -> dict:
 
 def post(cfg: ConnectorConfig, payload: dict) -> None:
     with http() as client:
-        check(client.post(cfg.config["webhook_url"], json=payload))
+        check(client.post(checked_url(config_of(cfg)["webhook_url"]), json=payload))
 
 
 def _configs(session, tenant_id: str, kind: str) -> list[ConnectorConfig]:
@@ -54,7 +55,7 @@ def on_task_assigned(event: dict) -> None:
         for cfg in _configs(s, event["tenant_id"], "teams"):
             if not _wants(cfg, "assigned") or (sub and sub.source_app_id != cfg.source_app_id):
                 continue
-            base = (cfg.config or {}).get("app_base_url", "http://localhost:5173")
+            base = (cfg.config or {}).get("app_base_url") or get_settings().app_url
             title = (sub.meta or {}).get("title") if sub else None
             post(cfg, _card(
                 "New item in your review queue",
@@ -70,7 +71,7 @@ def on_escalated(event: dict) -> None:
         for cfg in _configs(s, event["tenant_id"], "teams"):
             if not _wants(cfg, "escalated") or (sub and sub.source_app_id != cfg.source_app_id):
                 continue
-            base = (cfg.config or {}).get("app_base_url", "http://localhost:5173")
+            base = (cfg.config or {}).get("app_base_url") or get_settings().app_url
             post(cfg, _card(
                 "Review escalated to oversight",
                 [f"Submission {event['submission_id'][:8]} needs attention.", f"Reason: {event.get('reason', 'unknown')}"],

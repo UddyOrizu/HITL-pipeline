@@ -19,7 +19,9 @@ COPY db ./db
 COPY prompts ./prompts
 COPY scripts ./scripts
 COPY alembic.ini ./
-RUN pip install --no-cache-dir ".[all]"
+# EXTRAS adds optional integrations, e.g. --build-arg EXTRAS=all,azure,observability for Azure with Sentry.
+ARG EXTRAS=all
+RUN pip install --no-cache-dir ".[${EXTRAS}]"
 COPY --from=web /web/dist ./web/dist
 RUN useradd -m por && mkdir -p /app/var && chown -R por /app/var
 USER por

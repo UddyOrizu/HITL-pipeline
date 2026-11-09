@@ -139,7 +139,7 @@ def summarise(session: Session, task: ReviewTask) -> dict:
 
 def check_policy(policy: dict | None, summary: dict) -> tuple[str, list[str]]:
     """Returns (action, reasons). action is 'ok', 'warn', 'block' or 'flag'."""
-    p = {**DEFAULT_POLICY, **(policy or {})}
+    p = {**DEFAULT_POLICY, **{k: v for k, v in (policy or {}).items() if v is not None}}
     reasons = []
     if summary["reading_ratio"] < p["min_reading_ratio"]:
         reasons.append(

@@ -10,7 +10,7 @@ import hashlib
 import json
 from datetime import datetime
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from db.models import AuditEvent, new_id, utcnow
@@ -82,17 +82,26 @@ def record(
     return ev
 
 
-def verify_chain(session: Session, tenant_id: str) -> dict:
-    """Recompute every hash. Returns {"valid": bool, "count": n, "broken_at": seq | None}."""
-    events = session.scalars(
-        select(AuditEvent).where(AuditEvent.tenant_id == tenant_id).order_by(AuditEvent.seq)
-    ).all()
+def verify_chain(session: Session, tenant_id: str, batch: int = 2000) -> dict:
+    """Recompute every hash, reading the chain in batches. Returns {"valid", "count", "broken_at", "head"}."""
     prev = GENESIS
-    for i, ev in enumerate(events, start=1):
-        if ev.seq != i or ev.prev_hash != prev or compute_hash(prev, _body(ev)) != ev.hash:
-            return {"valid": False, "count": len(events), "broken_at": ev.seq}
-        prev = ev.hash
-    return {"valid": True, "count": len(events), "broken_at": None, "head": prev}
+    expected = 1
+    last_seq = 0
+    while True:
+        events = session.scalars(
+            select(AuditEvent).where(AuditEvent.tenant_id == tenant_id, AuditEvent.seq > last_seq)
+            .order_by(AuditEvent.seq).limit(batch)
+        ).all()
+        if not events:
+            break
+        for ev in events:
+            if ev.seq != expected or ev.prev_hash != prev or compute_hash(prev, _body(ev)) != ev.hash:
+                total = session.scalar(select(func.count()).select_from(AuditEvent).where(AuditEvent.tenant_id == tenant_id))
+                return {"valid": False, "count": total, "broken_at": ev.seq}
+            prev = ev.hash
+            expected += 1
+        last_seq = events[-1].seq
+    return {"valid": True, "count": expected - 1, "broken_at": None, "head": prev}
 
 
 def events_for(session: Session, tenant_id: str, entity_ids: list[str]) -> list[AuditEvent]:

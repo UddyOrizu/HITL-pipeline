@@ -1,18 +1,33 @@
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { Empty, ErrorBox, useLoad } from "../components/ui";
+import "./review.css";
 
 type WF = { id: string; name: string; stages: string[] };
+// Sent by My submissions' "Revise and submit again".
+type Revision = { previous_submission_id: string; title: string | null; workflow_id: string | null };
+
+function readRevision(state: unknown): Revision | null {
+  const s = state as Partial<Revision> | null;
+  if (!s || typeof s.previous_submission_id !== "string" || !s.previous_submission_id) return null;
+  return {
+    previous_submission_id: s.previous_submission_id,
+    title: typeof s.title === "string" ? s.title : null,
+    workflow_id: typeof s.workflow_id === "string" ? s.workflow_id : null,
+  };
+}
 
 const ACCEPT = ".txt,.docx,.pptx,.ppt,.pdf";
 
 export default function Submit() {
   const nav = useNavigate();
+  const location = useLocation();
+  const [revision, setRevision] = useState<Revision | null>(() => readRevision(location.state));
   const { data: workflows, error: wfErr } = useLoad(() => api<WF[]>("/v1/portal/workflows"));
   const [mode, setMode] = useState<"file" | "text">("file");
-  const [workflowId, setWorkflowId] = useState("");
-  const [title, setTitle] = useState("");
+  const [workflowId, setWorkflowId] = useState(revision?.workflow_id ?? "");
+  const [title, setTitle] = useState(revision?.title ?? "");
   const [file, setFile] = useState<File | null>(null);
   const [text, setText] = useState("");
   const [refs, setRefs] = useState<File[]>([]);
@@ -22,7 +37,16 @@ export default function Submit() {
   const [err, setErr] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
 
-  const wf = workflowId || workflows?.[0]?.id || "";
+  // The revision's workflow may since have been removed or closed to web submissions: fall back to the first.
+  const wfKnown = !workflowId || !workflows || workflows.some((w) => w.id === workflowId);
+  const wf = (wfKnown && workflowId) || workflows?.[0]?.id || "";
+
+  function clearRevision() {
+    setRevision(null);
+    setTitle("");
+    setWorkflowId("");
+    nav(location.pathname + location.search, { replace: true, state: null }); // a reload shouldn't bring it back
+  }
   const ready = wf && (mode === "file" ? !!file : text.trim().length > 0);
 
   async function submit(e: React.FormEvent) {
@@ -35,6 +59,7 @@ export default function Submit() {
     form.set("content_origin", origin);
     if (model) form.set("ai_model", model);
     form.set("metadata", JSON.stringify(title ? { title } : {}));
+    if (revision) form.set("previous_submission_id", revision.previous_submission_id);
     if (mode === "file" && file) form.set("file", file);
     else form.set("text", text);
     refs.forEach((r) => form.append("reference_files", r));
@@ -59,6 +84,14 @@ export default function Submit() {
           <div className="sub">Send a document or text to a reviewer. You'll see the decision and evidence under My submissions.</div>
         </div>
       </div>
+      {revision && (
+        <div className="notice" role="status" style={{ maxWidth: 760, boxSizing: "border-box" }}>
+          <strong>Revision of {revision.title || <span className="mono">{revision.previous_submission_id.slice(0, 8)}</span>}.</strong>{" "}
+          This will be recorded as a revised version of your earlier submission.{" "}
+          {!wfKnown && "The original workflow is no longer available, so choose another. "}
+          <button type="button" className="linklike" onClick={clearRevision}>Not a revision? Submit as new</button>
+        </div>
+      )}
       <form className="card" style={{ maxWidth: 760 }} onSubmit={submit}>
         <div className="field-row">
           <div>

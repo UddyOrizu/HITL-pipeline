@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 
+os.environ["POR_ENV_FILE"] = ""  # never read a developer's .env during tests
 os.environ.setdefault("POR_ENV", "test")
 os.environ.setdefault("POR_INLINE_JOBS", "true")
 os.environ.setdefault("POR_MODEL_PROVIDER", "heuristic")
@@ -21,12 +22,13 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("POR_DATABASE_URL", PG_URL or f"sqlite:///{tmp_path}/test.db")
     monkeypatch.setenv("POR_STORAGE_DIR", str(tmp_path / "storage"))
     monkeypatch.setenv("POR_PUBLIC_BASE_URL", "http://testserver")
+    monkeypatch.setenv("POR_MAIL_DIR", str(tmp_path / "mail"))
     from services.config import get_settings
 
     get_settings.cache_clear()
     from db.models import Base
     from db.session import reset_engine
-    from services import canary, model_gateway, storage, webhooks, workflow
+    from services import canary, mailer, model_gateway, ratelimit, sso, storage, webhooks, workflow
 
     engine = reset_engine()
     if PG_URL:
@@ -45,6 +47,9 @@ def env(tmp_path, monkeypatch):
     canary.set_rng(random.Random(7))
     workflow.set_rng(random.Random(11))
     webhooks.set_transport(None)
+    sso.set_transport(None)
+    ratelimit.reset()
+    mailer.outbox().clear()
     yield tmp_path
     engine.dispose()
     get_settings.cache_clear()

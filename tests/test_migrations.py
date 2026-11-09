@@ -24,5 +24,6 @@ def test_migrations_match_models(tmp_path, monkeypatch):
     import importlib
 
     rls = importlib.import_module("db.migrations.versions.0002_postgres_controls")
-    assert set(TENANT_TABLES) == set(rls.TENANT_TABLES)
+    later = importlib.import_module("db.migrations.versions.0006_operations")
+    assert set(TENANT_TABLES) == set(rls.TENANT_TABLES) | set(later.RLS_TABLES)
     get_settings.cache_clear()

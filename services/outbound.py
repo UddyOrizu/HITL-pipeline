@@ -13,7 +13,7 @@ import re
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from db.models import Canary, Comment, Decision, ReviewTask, Submission, Workflow
+from db.models import Canary, Comment, Decision, ReviewTask, Span, Submission, Workflow
 from services import assurance
 
 REDACTED = "[redacted: refers to review-only content]"
@@ -86,8 +86,11 @@ def feedback(session: Session, sub: Submission) -> list[dict]:
     for c, t in rows:
         if c.span_id in hidden:
             continue
+        span = session.get(Span, c.span_id) if c.span_id else None
         out.append({
             "span_id": c.span_id,
+            # The passage the comment is about (original text only: canary spans are skipped above).
+            "quote": span.text[:400] if span is not None and not span.review_only else None,
             "kind": c.kind,
             "body": redact(c.body, canaries),
             "suggested_text": redact(c.suggested_text, canaries),

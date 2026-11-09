@@ -84,13 +84,23 @@ def test_integrations_console_app_management(client):
     created = client.post("/v1/integrations/apps", json={"name": "Drafting bot", "webhook_url": "https://x.test/h"}, headers=owner).json()
     assert created["api_key"].startswith("por_") and created["webhook_secret"]
     assert "api_key" not in client.get("/v1/integrations/apps", headers=owner).json()[0]
-    rotated = client.post(f"/v1/integrations/apps/{created['id']}/rotate-key", headers=owner).json()
+    # Rotation with a grace period: both keys work until the old one is revoked.
+    rotated = client.post(f"/v1/integrations/apps/{created['id']}/rotate-key", json={"grace_hours": 24}, headers=owner).json()
+    assert rotated["previous_key_valid_until"]
+    assert client.get("/v1/workflows", headers={"X-API-Key": created["api_key"]}).status_code == 200
+    assert client.get("/v1/workflows", headers={"X-API-Key": rotated["api_key"]}).status_code == 200
+    client.post(f"/v1/integrations/apps/{created['id']}/revoke-previous-key", headers=owner)
     assert client.get("/v1/workflows", headers={"X-API-Key": created["api_key"]}).status_code == 401
+    # Without a grace period the old key stops at once.
+    again = client.post(f"/v1/integrations/apps/{created['id']}/rotate-key", json={"grace_hours": 0}, headers=owner).json()
+    assert client.get("/v1/workflows", headers={"X-API-Key": rotated["api_key"]}).status_code == 401
+    rotated = again
     assert client.get("/v1/workflows", headers={"X-API-Key": rotated["api_key"]}).status_code == 200
     client.patch(f"/v1/integrations/apps/{created['id']}", json={"active": False}, headers=owner)
     assert client.get("/v1/workflows", headers={"X-API-Key": rotated["api_key"]}).status_code == 401
     conn = client.post("/v1/integrations/connectors", json={"source_app_id": world["app_id"], "kind": "jira",
-                                                            "config": {"api_token": "secret", "base_url": "https://j"}}, headers=owner).json()
+                                                            "config": {"api_token": "secret", "base_url": "https://j.example.test",
+                                                                       "email": "bot@acme.test"}}, headers=owner).json()
     assert conn["config"]["api_token"] == "***"
 
 

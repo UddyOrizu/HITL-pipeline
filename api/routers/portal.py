@@ -8,12 +8,13 @@ app sees: status, decision, feedback and the evidence pack. Never canaries, tele
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from api.deps import AppPrincipal, UserPrincipal, get_db, request_channel, require_roles
+from api.pagination import Page, paginate
 from api.routers.submissions import create, parse
 from db.models import SourceApp, Submission, Workflow
 from services import evidence, outbound, workflow
@@ -50,6 +51,9 @@ def _view(db: Session, sub: Submission) -> dict:
     data = outbound.submission_view(db, sub)
     data["title"] = (sub.meta or {}).get("title") or next((d.filename for d in sub.documents if d.role == "primary"), None)
     data["has_evidence_pack"] = evidence.latest_pack(db, sub) is not None
+    wf = db.get(Workflow, sub.workflow_id)
+    data["workflow_id"] = wf.family_id if wf else None
+    data["previous_submission_id"] = sub.previous_submission_id
     data["feedback"] = outbound.feedback(db, sub) if sub.final_outcome else []
     outbound.assert_no_canary_leak(db, data, [sub.id])
     return data
@@ -69,6 +73,8 @@ async def submit(request: Request, p: UserPrincipal = Depends(submitter), db: Se
     """Multipart form (file or text) or JSON, same fields as POST /v1/submissions."""
     body, primary, refs = await parse(request)
     app = portal_app(db, p.tenant_id)
+    if body.previous_submission_id:
+        _mine(db, p, body.previous_submission_id)  # a revision must follow one of your own submissions
     body.metadata = {**(body.metadata or {}), "submitted_by": p.user.id, "author_email": p.user.email,
                      "submitted_via": "portal"}
     sub, _ = create(db, AppPrincipal(app), body, primary, refs, body.idempotency_key, f"user:{p.user.id}",
@@ -77,13 +83,14 @@ async def submit(request: Request, p: UserPrincipal = Depends(submitter), db: Se
 
 
 @router.get("/submissions")
-def list_mine(status: str | None = Query(None), p: UserPrincipal = Depends(submitter), db: Session = Depends(get_db)):
+def list_mine(response: Response, status: str | None = Query(None), page: Page = Depends(),
+              p: UserPrincipal = Depends(submitter), db: Session = Depends(get_db)):
     app = portal_app(db, p.tenant_id)
-    q = select(Submission).where(Submission.tenant_id == p.tenant_id, Submission.source_app_id == app.id)
+    q = select(Submission).where(Submission.tenant_id == p.tenant_id, Submission.source_app_id == app.id,
+                                 Submission.meta["submitted_by"].as_string() == p.user.id)
     if status:
         q = q.where(Submission.status == status)
-    subs = [s for s in db.scalars(q.order_by(Submission.created_at.desc())).all() if (s.meta or {}).get("submitted_by") == p.user.id]
-    return [_view(db, s) for s in subs[:200]]
+    return [_view(db, s) for s in paginate(db, q.order_by(Submission.created_at.desc()), page, response)]
 
 
 @router.get("/submissions/{submission_id}")

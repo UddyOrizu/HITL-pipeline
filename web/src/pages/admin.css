@@ -1,0 +1,102 @@
+/* Admin pages: integrations console, organisation settings, organisations. Scoped to .admin-page (modals render
+   inside the page, so they are covered too). Uses the theme tokens from styles.css. */
+
+.admin-page .block-gap { margin-bottom: 16px; }
+.admin-page .section-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin: 20px 0 12px; flex-wrap: wrap; }
+.admin-page .section-head h2 { margin: 0 0 2px; }
+.admin-page .hint { font-size: 12px; margin-top: 4px; line-height: 1.45; }
+.admin-page .small-text { font-size: 12px; }
+.admin-page .strong { font-weight: 600; }
+.admin-page .break { word-break: break-all; }
+.admin-page .nowrap { flex-wrap: nowrap; }
+.admin-page .spacer { flex: 1; }
+.admin-page .text-high { color: var(--high); }
+.admin-page .num { text-align: right; font-variant-numeric: tabular-nums; }
+.admin-page th.num { text-align: right; }
+.admin-page .pad { padding: 16px 18px; }
+.admin-page .card.flush { padding: 0; overflow: hidden; }
+.admin-page .table-scroll { overflow-x: auto; }
+.admin-page table.loading { opacity: 0.6; }
+.admin-page tr.row-muted td { color: var(--muted); }
+.admin-page .error-cell { max-width: 280px; font-size: 12px; word-break: break-word; }
+.admin-page .tab-count { margin-left: 6px; font-size: 11px; background: var(--surface-2); color: var(--muted); border-radius: 999px; padding: 0 7px; }
+
+/* Forms */
+.admin-page .field { margin-top: 2px; }
+.admin-page fieldset { border: none; padding: 0; margin: 10px 0 0; min-width: 0; }
+.admin-page fieldset > legend { font-size: 12px; font-weight: 600; color: var(--muted); padding: 0; margin-bottom: 4px; }
+.admin-page .field-error { color: var(--high); font-size: 12px; margin-top: 4px; }
+.admin-page [aria-invalid="true"] { border-color: var(--high); }
+.admin-page .req { color: var(--high); }
+.admin-page label.check span .sub { font-size: 12px; }
+.admin-page .modal-actions { justify-content: flex-end; margin-top: 16px; }
+.admin-page .modal-body p:last-child { margin-bottom: 0; }
+.admin-page .modal-scroll { max-height: calc(100vh - 140px); overflow-y: auto; margin: 0 -8px; padding: 0 8px; }
+.admin-page .modal-scroll .modal-actions { position: sticky; bottom: 0; background: var(--surface); padding: 10px 0 2px; margin-top: 12px; border-top: 1px solid var(--border); }
+.admin-page details.advanced { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 10px; }
+.admin-page details.advanced > summary { cursor: pointer; font-weight: 600; font-size: 13px; color: var(--accent); }
+.admin-page .inline-notice { display: inline-block; margin: 0; padding: 2px 8px; font-size: 12px; }
+.admin-page .inline-form { display: flex; gap: 8px; flex-wrap: wrap; }
+.admin-page .inline-form input { flex: 1 1 260px; width: auto; }
+.admin-page .inline-number { width: 90px; display: inline-block; padding: 4px 8px; margin: 0 4px; }
+.admin-page .input-affix { display: flex; align-items: center; gap: 6px; }
+.admin-page .input-affix span { color: var(--muted); font-size: 13px; white-space: nowrap; }
+.admin-page .toolbar input[type="search"] { min-width: 240px; }
+.admin-page .toolbar-check { align-self: center; margin: 18px 0 0; }
+
+/* Radio choice cards (grace period, retention, connector kind) */
+.admin-page .choice-list, .admin-page .kind-picker { display: grid; gap: 8px; margin: 12px 0; }
+.admin-page .kind-picker { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+.admin-page .choice { display: flex; gap: 10px; align-items: flex-start; border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; margin: 0; cursor: pointer; color: var(--text); font-size: 13px; font-weight: 400; background: var(--surface); }
+.admin-page .choice > input[type="radio"] { width: auto; margin-top: 3px; }
+.admin-page .choice > span { display: flex; flex-direction: column; gap: 2px; }
+.admin-page .choice .sub { font-size: 12px; }
+.admin-page .choice.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); background: var(--accent-soft); }
+
+/* Copyable values */
+.admin-page .copy-field { margin: 10px 0; }
+.admin-page .copy-field-label { font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 4px; }
+.admin-page .copy-field-row { display: flex; gap: 8px; align-items: center; }
+.admin-page .copy-field-row input { flex: 1; min-width: 0; background: var(--surface-2); }
+
+/* Source app cards */
+.admin-page .app-list { display: grid; gap: 12px; }
+.admin-page .app-card.inactive { opacity: 0.8; border-style: dashed; }
+.admin-page .app-card-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 10px; flex-wrap: wrap; }
+.admin-page .app-card-head h3 { font-size: 15px; margin: 0 0 2px; }
+.admin-page .app-card-head .mono .btn { margin-left: 6px; vertical-align: middle; }
+.admin-page .app-card .kv { margin: 0 0 12px; }
+.admin-page .app-actions { border-top: 1px solid var(--border); padding-top: 12px; }
+.admin-page .id-list { margin: 0 0 8px; padding-left: 18px; max-height: 200px; overflow: auto; }
+
+/* Organisation settings */
+.admin-page .settings-layout { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 20px; align-items: start; }
+.admin-page .settings-nav { position: sticky; top: 20px; display: flex; flex-direction: column; gap: 2px; }
+.admin-page .settings-nav a { padding: 6px 10px; border-radius: 7px; color: var(--text); font-size: 13px; }
+.admin-page .settings-nav a:hover { background: var(--surface-2); text-decoration: none; }
+.admin-page .settings-main { display: grid; gap: 16px; min-width: 0; }
+.admin-page .admin-section { scroll-margin-top: 16px; }
+.admin-page .admin-intro { margin-bottom: 12px; font-size: 13px; }
+.admin-page .admin-intro p { margin: 0 0 6px; }
+.admin-page .section-actions { margin-top: 14px; align-items: center; }
+.admin-page .detail-kv { margin: 12px 0 0; }
+.admin-page .subsection { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border); }
+.admin-page .explain-grid { margin-bottom: 4px; }
+.admin-page .explain { background: var(--surface-2); border-radius: 8px; padding: 10px 14px; font-size: 13px; }
+.admin-page .explain ul { margin: 0; padding-left: 18px; }
+.admin-page .table-title { margin: 18px 0 4px; }
+.admin-page .price-table td, .admin-page .price-table th { padding: 6px; }
+.admin-page .price-table input { padding: 5px 8px; min-width: 80px; }
+.admin-page .price-table td:first-child input { min-width: 180px; }
+.admin-page tr.row-invalid td { background: var(--high-soft); }
+.admin-page .sso-status { margin-bottom: 8px; font-size: 13px; }
+.admin-page .role-checks { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0 16px; }
+
+@media (max-width: 900px) {
+  .admin-page .settings-layout { grid-template-columns: 1fr; }
+  .admin-page .settings-nav { position: static; flex-direction: row; flex-wrap: wrap; }
+}
+@media (max-width: 760px) {
+  .admin-page .copy-field-row { flex-wrap: wrap; }
+  .admin-page .nowrap { flex-wrap: wrap; }
+}

@@ -1,0 +1,31 @@
+/* Review workspace, my submissions and submit: styles local to these pages (tokens come from styles.css). */
+
+/* Keyboard focus on passages and flags: distinct from the solid "selected" outline. */
+.span:focus-visible { outline: 2px dashed var(--accent); outline-offset: 3px; }
+.span.selected:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+
+.flag-item .flag-open { border-radius: 6px; cursor: pointer; }
+.flag-item .flag-open:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.flag-item.active { border-color: var(--accent); }
+.flag-item:focus-within { border-color: var(--accent); }
+
+/* A button that looks like a text link. */
+.linklike { background: none; border: none; padding: 0; font: inherit; font-size: 12px; color: var(--accent); cursor: pointer; text-decoration: underline; }
+.linklike:disabled { color: var(--muted); cursor: default; text-decoration: none; }
+
+/* Side-panel tabs (Review / References). */
+.panel .tabs { margin-bottom: 0; }
+
+/* Reference documents. */
+.ref-doc { border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin-bottom: 10px; background: var(--surface); }
+.ref-doc-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.ref-doc-name { font-weight: 600; font-size: 13px; word-break: break-word; }
+.ref-doc summary { cursor: pointer; font-size: 12px; color: var(--muted); margin-top: 6px; }
+.ref-text { font-family: var(--serif); font-size: 13px; line-height: 1.55; max-height: 420px; overflow-y: auto; margin-top: 8px; padding-right: 4px; }
+.ref-text .ref-section-title { font-family: var(--font); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 10px 0 4px; }
+.ref-text p { margin: 0 0 8px; white-space: pre-wrap; }
+.ref-text .ref-heading { font-family: var(--font); font-weight: 700; }
+
+/* Quoted passage above a reviewer comment. */
+.quote { border-left: 3px solid var(--border); padding: 2px 10px; margin: 4px 0 6px; color: var(--muted); font-family: var(--serif); font-size: 13px; white-space: pre-wrap; }
+.draft-note { font-size: 12px; }

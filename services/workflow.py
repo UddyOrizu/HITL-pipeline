@@ -19,11 +19,12 @@ TRANSITIONS: dict[str, set[str]] = {
     "received": {"processing", "cancelled", "deferred"},
     "processing": {"in_review", "deferred", "cancelled"},
     "in_review": {"spot_check", "approved", "rejected", "changes_requested", "deferred", "cancelled"},
-    "spot_check": {"approved", "rejected", "changes_requested", "cancelled"},
+    "spot_check": {"approved", "rejected", "changes_requested", "deferred", "cancelled"},
     "approved": set(),
     "rejected": set(),
     "changes_requested": set(),
-    "deferred": set(),
+    # An oversight lead can retry a deferred item: back to processing (it failed) or to review (no capacity).
+    "deferred": {"received", "in_review"},
     "cancelled": set(),
 }
 FINAL = {"approved", "rejected", "changes_requested", "deferred", "cancelled"}
@@ -31,6 +32,9 @@ OUTCOME_STATUS = {"approve": "approved", "reject": "rejected", "request_changes"
 HOLD_REASONS = {
     "awaiting_capacity", "awaiting_spot_check_reviewer", "spot_check_disagreement", "below_threshold", "release_check_failed",
 }
+# Holds an oversight lead settles with a decision, and holds settled by an action (assign, defer, cancel).
+DECISION_HOLDS = {"spot_check_disagreement", "below_threshold", "awaiting_spot_check_reviewer"}
+ACTION_HOLDS = {"awaiting_capacity", "awaiting_spot_check_reviewer", "release_check_failed"}
 
 _rng = random.SystemRandom()
 
@@ -90,13 +94,17 @@ def start_review(session: Session, sub: Submission) -> None:
     assign_stage(session, sub)
 
 
-def assign_stage(session: Session, sub: Submission) -> ReviewTask | None:
+def assign_stage(session: Session, sub: Submission, extra_exclude: set[str] | None = None,
+                 reviewer=None, actor: str = "system:assignment") -> ReviewTask | None:
+    """Assign the current stage. `reviewer` forces a choice (an oversight lead assigning past the caps)."""
     wf = workflow_of(session, sub)
     stages = stages_of(wf)
     stage = stages[sub.stage_index]
     effort = assignment.estimate_effort(assignment.word_count(session, sub), sub.risk_tier)
-    exclude = assignment.prior_reviewer_ids(session, sub.id)  # rotation: a different reviewer for each stage
-    reviewer = assignment.pick_reviewer(session, sub, wf, stage, effort, exclude)
+    if reviewer is None:
+        # Rotation: a different reviewer for each stage (and not the one an SLA breach moved it away from).
+        exclude = assignment.prior_reviewer_ids(session, sub.id) | (extra_exclude or set())
+        reviewer = assignment.pick_reviewer(session, sub, wf, stage, effort, exclude)
     if reviewer is None:
         return _overflow(session, sub, wf)
     task = assignment.create_task(session, sub, reviewer, sub.stage_index, stage, "primary", effort)
@@ -105,7 +113,7 @@ def assign_stage(session: Session, sub: Submission) -> ReviewTask | None:
         for c in session.scalars(select(Canary).where(Canary.submission_id == sub.id, Canary.scored_task_id.is_(None))).all():
             c.scored_task_id = task.id
             c.scored_reviewer_id = reviewer.id
-    audit.record(session, sub.tenant_id, "system:assignment", "task.assigned", "review_task", task.id,
+    audit.record(session, sub.tenant_id, actor, "task.assigned", "review_task", task.id,
                  {"submission_id": sub.id, "reviewer_id": reviewer.id, "stage": stage.get("name"), "kind": "primary",
                   "effort_minutes": effort})
     from services import jobs
@@ -139,21 +147,28 @@ def _sample_for_spot_check(session: Session, sub: Submission, wf: Workflow, revi
     return _rng.random() < min(rate, 1.0)
 
 
-def assign_spot_check(session: Session, sub: Submission) -> ReviewTask | None:
+def assign_spot_check(session: Session, sub: Submission, reviewer=None, actor: str = "system:assignment",
+                      extra_exclude: set[str] | None = None) -> ReviewTask | None:
     wf = workflow_of(session, sub)
     stage = {"name": "Spot-check", "team_id": (wf.risk_policy or {}).get("spot_check_team_id"),
              "sla_hours": stages_of(wf)[-1].get("sla_hours")}
     effort = assignment.estimate_effort(assignment.word_count(session, sub), sub.risk_tier)
-    reviewer = assignment.pick_reviewer(session, sub, wf, stage, effort, assignment.prior_reviewer_ids(session, sub.id))
+    if reviewer is None:
+        exclude = assignment.prior_reviewer_ids(session, sub.id) | (extra_exclude or set())
+        reviewer = assignment.pick_reviewer(session, sub, wf, stage, effort, exclude)
     if reviewer is None:
         if sub.hold_reason != "awaiting_spot_check_reviewer":
             hold(session, sub, "awaiting_spot_check_reviewer", escalate_now=True)
         return None
     task = assignment.create_task(session, sub, reviewer, sub.stage_index, stage, "spot_check", effort)
     sub.hold_reason = None
-    audit.record(session, sub.tenant_id, "system:assignment", "task.assigned", "review_task", task.id,
+    audit.record(session, sub.tenant_id, actor, "task.assigned", "review_task", task.id,
                  {"submission_id": sub.id, "reviewer_id": reviewer.id, "stage": "Spot-check", "kind": "spot_check",
                   "effort_minutes": effort})
+    from services import jobs
+
+    jobs.publish("task.assigned", {"tenant_id": sub.tenant_id, "task_id": task.id, "reviewer_id": reviewer.id,
+                                    "submission_id": sub.id, "stage": "Spot-check", "kind": "spot_check"}, session=session)
     return task
 
 
@@ -296,14 +311,76 @@ def release(session: Session, sub: Submission, outcome: str, reason: str, actor:
 
 
 def resolve(session: Session, sub: Submission, outcome: str, reason: str, actor: str) -> None:
-    """Oversight lead resolves a held item (disagreement, threshold block)."""
-    if sub.status not in ("in_review", "spot_check") or sub.hold_reason not in (
-        "spot_check_disagreement", "below_threshold", "awaiting_spot_check_reviewer"
-    ):
-        raise TransitionError("submission is not held for oversight resolution")
+    """Oversight lead resolves a held item with a decision (disagreement, threshold block, no spot-checker)."""
+    if sub.status not in ("in_review", "spot_check") or sub.hold_reason not in DECISION_HOLDS:
+        raise TransitionError("submission is not held for an oversight decision")
     audit.record(session, sub.tenant_id, actor, "submission.resolved", "submission", sub.id,
                  {"outcome": outcome, "hold_reason": sub.hold_reason})
     finalise(session, sub, outcome, reason, actor, override_threshold=True)
+
+
+def _detach_unscored_canaries(session: Session, task: ReviewTask) -> None:
+    for c in session.scalars(select(Canary).where(Canary.scored_task_id == task.id, Canary.caught.is_(None))).all():
+        c.scored_task_id = None
+        c.scored_reviewer_id = None
+
+
+def _close_open_tasks(session: Session, sub: Submission) -> None:
+    for t in session.scalars(select(ReviewTask).where(ReviewTask.submission_id == sub.id, ReviewTask.status == "assigned")).all():
+        t.status = "cancelled"
+        t.completed_at = utcnow()
+        _detach_unscored_canaries(session, t)
+
+
+def assign_to(session: Session, sub: Submission, reviewer, actor: str) -> ReviewTask:
+    """Oversight lead assigns an item waiting for a reviewer to a named person, past the volume caps and team
+    limits. The conflict rule and rotation still apply."""
+    if sub.status not in ("in_review", "spot_check") or sub.hold_reason not in ("awaiting_capacity", "awaiting_spot_check_reviewer"):
+        raise TransitionError("only items waiting for a reviewer can be assigned")
+    wf = workflow_of(session, sub)
+    eligible = {u.id for u in assignment.eligible_reviewers(session, sub, wf, {"team_id": None},
+                                                            assignment.prior_reviewer_ids(session, sub.id))}
+    if reviewer.id not in eligible:
+        raise TransitionError("this person cannot review the item: not an active reviewer, already reviewed it, "
+                              "or wrote it")
+    audit.record(session, sub.tenant_id, actor, "submission.assigned_by_oversight", "submission", sub.id,
+                 {"reviewer_id": reviewer.id, "hold_reason": sub.hold_reason})
+    if sub.status == "spot_check":
+        return assign_spot_check(session, sub, reviewer=reviewer, actor=actor)
+    return assign_stage(session, sub, reviewer=reviewer, actor=actor)
+
+
+def defer(session: Session, sub: Submission, reason: str, actor: str) -> None:
+    """Stop work on an item and tell the source app, e.g. after a release check failure that needs a resubmission."""
+    if sub.status not in ("in_review", "spot_check", "received", "processing"):
+        raise TransitionError(f"cannot defer a submission that is {sub.status}; cancel it instead")
+    _close_open_tasks(session, sub)
+    prior_hold = sub.hold_reason
+    transition(session, sub, "deferred", actor, reason=reason, hold_reason=prior_hold)
+    sub.hold_reason = None
+    webhooks.emit(session, sub, "submission.deferred", {"reason": reason})
+    assign_pending(session, sub.tenant_id)
+
+
+def retry(session: Session, sub: Submission, actor: str) -> str:
+    """Retry a deferred item: processing again if it failed there, otherwise back into review."""
+    if sub.status != "deferred":
+        raise TransitionError("only deferred submissions can be retried")
+    if sub.content_hash is None or sub.processing_error:
+        sub.processing_attempts = 0
+        sub.retry_at = None
+        sub.processing_error = None
+        transition(session, sub, "received", actor, reason="retry")
+        from services import jobs
+        from services.hooks import on_commit
+
+        sid, tid = sub.id, sub.tenant_id
+        on_commit(session, lambda: jobs.enqueue("process_submission", submission_id=sid, tenant_id=tid))
+        return "processing"
+    transition(session, sub, "in_review", actor, reason="retry")
+    webhooks.emit(session, sub, "submission.in_review")
+    assign_stage(session, sub)
+    return "in_review"
 
 
 def cancel(session: Session, sub: Submission, actor: str) -> None:
@@ -311,12 +388,15 @@ def cancel(session: Session, sub: Submission, actor: str) -> None:
         raise TransitionError(f"submission already {sub.status}")
     transition(session, sub, "cancelled", actor)
     sub.hold_reason = None
-    for t in session.scalars(select(ReviewTask).where(ReviewTask.submission_id == sub.id, ReviewTask.status == "assigned")).all():
-        t.status = "cancelled"
+    _close_open_tasks(session, sub)
+    webhooks.emit(session, sub, "submission.cancelled", {"cancelled_by": actor.split(":", 1)[0]})
+    # The reviewer's time is free again: give it to anything waiting for capacity.
+    assign_pending(session, sub.tenant_id)
 
 
 def check_slas(session: Session) -> int:
-    """Escalate overdue review tasks. Run periodically by the worker."""
+    """Handle overdue review tasks. Run periodically. Each stage's on_sla_breach decides what happens:
+    "escalate" (default) flags the item to oversight; "reassign" also moves it to another reviewer."""
     now = utcnow()
     overdue = session.scalars(
         select(ReviewTask).where(ReviewTask.status == "assigned", ReviewTask.due_at.is_not(None),
@@ -326,4 +406,26 @@ def check_slas(session: Session) -> int:
         task.sla_escalated = True
         sub = session.get(Submission, task.submission_id)
         escalate(session, sub, "sla_breached", stage=task.stage_name, task_id=task.id, reviewer_id=task.reviewer_id)
+        stages = stages_of(workflow_of(session, sub))
+        stage = stages[task.stage] if task.stage < len(stages) else {}
+        if stage.get("on_sla_breach") == "reassign":
+            _reassign_overdue(session, sub, task)
     return len(overdue)
+
+
+def _reassign_overdue(session: Session, sub: Submission, task: ReviewTask) -> None:
+    primary = task.kind == "primary" and sub.status == "in_review" and task.stage == sub.stage_index
+    spot = task.kind == "spot_check" and sub.status == "spot_check"
+    if not (primary or spot):
+        return
+    task.status = "cancelled"
+    task.completed_at = utcnow()
+    _detach_unscored_canaries(session, task)
+    session.flush()
+    if primary:
+        new_task = assign_stage(session, sub, extra_exclude={task.reviewer_id})
+    else:
+        new_task = assign_spot_check(session, sub, extra_exclude={task.reviewer_id})
+    audit.record(session, sub.tenant_id, "system:workflow", "task.reassigned", "review_task", task.id,
+                 {"submission_id": sub.id, "from_reviewer_id": task.reviewer_id, "reason": "sla_breached",
+                  "new_reviewer_id": new_task.reviewer_id if new_task else None})

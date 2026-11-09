@@ -34,7 +34,7 @@ DEFAULT_POLICY = {"min_score": 60, "below_action": "release_flag"}  # block | se
 
 
 def policy_for(workflow: Workflow) -> dict:
-    return {**DEFAULT_POLICY, **(workflow.assurance_policy or {})}
+    return {**DEFAULT_POLICY, **{k: v for k, v in (workflow.assurance_policy or {}).items() if v is not None}}
 
 
 def load_component(position: float) -> float:

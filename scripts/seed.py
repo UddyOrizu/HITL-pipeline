@@ -49,7 +49,8 @@ def seed(create_tables: bool = True) -> dict:
             ("admin@demo.test", "Demo Admin", ["admin"]),
         ]
         for email, name, roles in people:
-            db.add(User(tenant_id=t, email=email, name=name, roles=roles, team_ids=[team.id]))
+            db.add(User(tenant_id=t, email=email, name=name, roles=roles, team_ids=[team.id],
+                        is_platform_admin=email == "admin@demo.test"))  # the demo admin can try the Organisations page
         key, prefix, key_hash = generate_api_key()
         secret = generate_secret()
         app = SourceApp(tenant_id=t, name="Demo drafting assistant", api_key_prefix=prefix, api_key_hash=key_hash,

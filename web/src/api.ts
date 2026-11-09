@@ -1,6 +1,8 @@
 // Thin fetch wrapper. The token lives in localStorage; requests go to /v1 (proxied to the API in dev).
 
 const TOKEN_KEY = "por.token";
+const RETURN_KEY = "por.returnTo";
+const EXPIRED_KEY = "por.sessionExpired";
 
 export function getToken(): string | null {
   try {
@@ -19,6 +21,60 @@ export function setToken(token: string | null) {
   }
 }
 
+// Claims from the signed-in token (not verified here: the API verifies every request).
+export function tokenClaims(token: string | null = getToken()): { exp?: number; iat?: number; auth_time?: number } | null {
+  if (!token) return null;
+  try {
+    const part = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+    return JSON.parse(atob(part.padEnd(part.length + ((4 - (part.length % 4)) % 4), "=")));
+  } catch {
+    return null;
+  }
+}
+
+// Where to go back to after signing in again, and whether the last session expired (for a message).
+export function rememberReturn(path: string) {
+  try {
+    sessionStorage.setItem(RETURN_KEY, path);
+  } catch {
+    /* ignore */
+  }
+}
+
+export function takeReturn(): string | null {
+  try {
+    const v = sessionStorage.getItem(RETURN_KEY);
+    sessionStorage.removeItem(RETURN_KEY);
+    return v && v.startsWith("/") && !v.startsWith("//") ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+export function takeSessionExpired(): boolean {
+  try {
+    const v = sessionStorage.getItem(EXPIRED_KEY) === "1";
+    sessionStorage.removeItem(EXPIRED_KEY);
+    return v;
+  } catch {
+    return false;
+  }
+}
+
+// Called when the session ends mid-use: keep where the person was, then go to the sign-in page.
+export function sessionEnded() {
+  setToken(null);
+  if (location.pathname.startsWith("/login") || location.pathname.startsWith("/reset-password")) return;
+  rememberReturn(location.pathname + location.search);
+  try {
+    sessionStorage.setItem(EXPIRED_KEY, "1");
+  } catch {
+    /* ignore */
+  }
+  window.dispatchEvent(new Event("por:session-ended"));
+  location.assign("/login");
+}
+
 export class ApiError extends Error {
   status: number;
   detail: any;
@@ -29,11 +85,13 @@ export class ApiError extends Error {
   }
 }
 
-export async function api<T = any>(path: string, options: { method?: string; body?: any; raw?: boolean } = {}): Promise<T> {
+type Options = { method?: string; body?: any; raw?: boolean; auth?: boolean };
+
+async function request(path: string, options: Options = {}): Promise<Response> {
   // X-PoR-Channel labels decisions and submissions made from the web app in the evidence record.
   const headers: Record<string, string> = { "X-PoR-Channel": "ui" };
   const token = getToken();
-  if (token) headers.Authorization = `Bearer ${token}`;
+  if (token && options.auth !== false) headers.Authorization = `Bearer ${token}`;
   const form = typeof FormData !== "undefined" && options.body instanceof FormData;
   if (options.body !== undefined && !form) headers["Content-Type"] = "application/json";
   const res = await fetch(path, {
@@ -41,9 +99,8 @@ export async function api<T = any>(path: string, options: { method?: string; bod
     headers,
     body: options.body === undefined ? undefined : form ? options.body : JSON.stringify(options.body),
   });
-  if (res.status === 401) {
-    setToken(null);
-    if (!location.pathname.startsWith("/login")) location.assign("/login");
+  if (res.status === 401 && token && options.auth !== false && !path.startsWith("/v1/auth/")) {
+    sessionEnded();
   }
   if (!res.ok) {
     let detail: any = res.statusText;
@@ -52,11 +109,36 @@ export async function api<T = any>(path: string, options: { method?: string; bod
     } catch {
       /* not JSON */
     }
+    if (res.status === 429) detail = "Too many attempts. Wait a minute and try again.";
     throw new ApiError(res.status, detail);
   }
+  return res;
+}
+
+export async function api<T = any>(path: string, options: Options = {}): Promise<T> {
+  const res = await request(path, options);
   if (options.raw) return res as unknown as T;
   if (res.status === 204) return undefined as T;
   return res.json();
+}
+
+export type Page<T> = { items: T[]; total: number; nextOffset: number | null };
+
+// List endpoints return a JSON array; the total and next offset are in headers.
+export async function apiPage<T = any>(path: string): Promise<Page<T>> {
+  const res = await request(path);
+  const items = (await res.json()) as T[];
+  const total = Number(res.headers.get("X-Total-Count") ?? items.length);
+  const next = res.headers.get("X-Next-Offset");
+  return { items, total, nextOffset: next == null ? null : Number(next) };
+}
+
+// Build a query string from defined, non-empty values.
+export function qs(params: Record<string, string | number | boolean | null | undefined>): string {
+  const p = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== null && v !== "") p.set(k, String(v));
+  const s = p.toString();
+  return s ? `?${s}` : "";
 }
 
 export async function download(path: string, filename: string) {

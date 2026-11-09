@@ -14,25 +14,43 @@ class VirusFound(ValueError):
     pass
 
 
+class ScanUnavailable(RuntimeError):
+    """The scanner could not give a verdict. Uploads are refused (fail closed)."""
+
+
 def scan(data: bytes) -> None:
     s = get_settings()
     if s.clamav_host:
         _clamd_instream(s.clamav_host, s.clamav_port, data)
         return
+    if s.virus_scan_required:
+        raise ScanUnavailable("virus scanning is required but POR_CLAMAV_HOST is not set")
     if EICAR in data:
         raise VirusFound("Eicar-Test-Signature")
 
 
 def _clamd_instream(host: str, port: int, data: bytes) -> None:
-    with socket.create_connection((host, port), timeout=30) as sock:
-        sock.sendall(b"zINSTREAM\0")
-        for i in range(0, len(data), 64 * 1024):
-            chunk = data[i : i + 64 * 1024]
-            sock.sendall(struct.pack("!L", len(chunk)) + chunk)
-        sock.sendall(struct.pack("!L", 0))
-        reply = sock.recv(4096).decode(errors="replace").strip("\0\n ")
-    if "FOUND" in reply:
-        raise VirusFound(reply.split(":", 1)[-1].replace("FOUND", "").strip())
+    """clamd INSTREAM. Only an explicit "OK" verdict passes; errors, size limits and timeouts refuse the file."""
+    try:
+        with socket.create_connection((host, port), timeout=30) as sock:
+            sock.sendall(b"zINSTREAM\0")
+            for i in range(0, len(data), 64 * 1024):
+                chunk = data[i : i + 64 * 1024]
+                sock.sendall(struct.pack("!L", len(chunk)) + chunk)
+            sock.sendall(struct.pack("!L", 0))
+            reply = b""
+            while not reply.endswith(b"\0"):
+                part = sock.recv(4096)
+                if not part:
+                    break
+                reply += part
+    except OSError as exc:
+        raise ScanUnavailable(f"virus scanner unreachable: {exc}") from None
+    text = reply.decode(errors="replace").strip("\0\n ")
+    if text.endswith("FOUND"):
+        raise VirusFound(text.split(":", 1)[-1].replace("FOUND", "").strip())
+    if not text.endswith("OK"):
+        raise ScanUnavailable(f"virus scanner gave no verdict: {text[:200] or 'empty reply'}")
 
 
 # Extension -> canonical format. Magic bytes are checked so a renamed file is rejected.

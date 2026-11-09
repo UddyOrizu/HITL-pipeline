@@ -7,6 +7,7 @@ import binascii
 import json
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi import Response as FastResponse
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import or_, select
@@ -14,8 +15,10 @@ from sqlalchemy.orm import Session
 from starlette.datastructures import UploadFile
 
 from api.deps import AppPrincipal, get_db, request_channel, require_app
+from api.pagination import Page, paginate
 from db.models import Submission, Workflow
-from services import assurance, audit, evidence, ingestion, jobs, outbound, webhooks, workflow
+from services import assurance, audit, evidence, ingestion, jobs, outbound, ratelimit, webhooks, workflow
+from services.config import get_settings
 from services.storage import get_storage
 
 router = APIRouter(prefix="/v1", tags=["source apps"])
@@ -138,6 +141,9 @@ def create(db: Session, principal: AppPrincipal, body: SubmissionIn, primary: tu
     except ingestion.UnsupportedType as exc:
         db.rollback()
         raise HTTPException(415, str(exc)) from None
+    except ingestion.ScanUnavailable as exc:
+        db.rollback()
+        raise HTTPException(503, f"upload refused: {exc}") from None
     except (ingestion.IngestionError, ingestion.VirusFound) as exc:
         db.rollback()
         raise HTTPException(422, f"{type(exc).__name__}: {exc}") from None
@@ -160,6 +166,7 @@ async def create_submission(
     idempotency_key_header: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
     """Submit text or a file (multipart or JSON with base64) for human review."""
+    ratelimit.enforce(f"submissions:{principal.app.id}", get_settings().rate_limit_submissions_per_minute)
     body, primary, refs = await parse(request)
     sub, replayed = create(db, principal, body, primary, refs, idempotency_key_header or body.idempotency_key,
                            f"app:{principal.app.id}", request_channel(request))
@@ -173,6 +180,18 @@ def _own(db: Session, principal: AppPrincipal, submission_id: str) -> Submission
     if sub is None or sub.tenant_id != principal.tenant_id or sub.source_app_id != principal.app.id:
         raise HTTPException(404, "submission not found")
     return sub
+
+
+@router.get("/submissions")
+def list_submissions(response: FastResponse, status: str | None = None, external_ref: str | None = None,
+                     page: Page = Depends(), principal: AppPrincipal = Depends(require_app), db: Session = Depends(get_db)):
+    """This source app's submissions, newest first (X-Total-Count has the total)."""
+    q = select(Submission).where(Submission.tenant_id == principal.tenant_id, Submission.source_app_id == principal.app.id)
+    if status:
+        q = q.where(Submission.status == status)
+    if external_ref:
+        q = q.where(Submission.external_ref == external_ref)
+    return [outbound.submission_view(db, s) for s in paginate(db, q.order_by(Submission.created_at.desc()), page, response)]
 
 
 @router.get("/submissions/{submission_id}")

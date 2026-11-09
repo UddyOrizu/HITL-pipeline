@@ -116,7 +116,14 @@ REVIEWER_TOOLS = [
 
 
 def main() -> None:
-    build(mode()).run("streamable-http" if "--http" in sys.argv else "stdio")
+    server = build(mode())
+    if "--http" in sys.argv:
+        # POR_MCP_PORT lets the HTTP server run next to the API, which also defaults to 8000.
+        # POR_MCP_HOST=0.0.0.0 in containers; the default only listens on this machine.
+        server.run("streamable-http", host=os.environ.get("POR_MCP_HOST", "127.0.0.1"),
+                   port=int(os.environ.get("POR_MCP_PORT", "8000")))
+    else:
+        server.run("stdio")
 
 
 if __name__ == "__main__":

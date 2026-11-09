@@ -43,6 +43,29 @@ def get_task(task_id: str, p: UserPrincipal = Depends(reviewer), db: Session = D
         _raise(exc)
 
 
+@router.get("/review/tasks/{task_id}/references")
+def get_references(task_id: str, p: UserPrincipal = Depends(reviewer), db: Session = Depends(get_db)):
+    """Reference documents sent with the submission (client file, source material), as extracted text."""
+    try:
+        return review.references(db, p.user, task_id)
+    except ReviewError as exc:
+        _raise(exc)
+
+
+@router.get("/review/tasks/{task_id}/references/{document_id}/file")
+def get_reference_file(task_id: str, document_id: str, p: UserPrincipal = Depends(reviewer), db: Session = Depends(get_db)):
+    try:
+        doc, data = review.reference_file(db, p.user, task_id, document_id)
+    except ReviewError as exc:
+        _raise(exc)
+    from urllib.parse import quote
+
+    from fastapi.responses import Response as Raw
+
+    return Raw(data, media_type=doc.mime_type,
+               headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(doc.filename)}"})
+
+
 @router.post("/review/tasks/{task_id}/flags/{flag_id}/open")
 def open_flag(task_id: str, flag_id: str, p: UserPrincipal = Depends(reviewer), db: Session = Depends(get_db)):
     try:

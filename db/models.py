@@ -59,7 +59,11 @@ class Tenant(TimestampMixin, Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     region: Mapped[str] = mapped_column(String(20), default="uk", nullable=False)
+    # allow_admin_reviewers, retention_days, currency, usd_to_currency, default_hourly_rate, model_prices,
+    # notifications {...}, sso {issuer, client_id, client_secret (encrypted), domains, auto_provision_roles, ...}
     settings: Mapped[dict] = mapped_column(JSONType, default=dict, nullable=False)
+    # A deactivated tenant's users and source apps can no longer sign in or call the API.
+    active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1", nullable=False)
 
 
 class Team(TenantScoped, Base):
@@ -67,6 +71,8 @@ class Team(TenantScoped, Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     daily_ceiling_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Reviewer cost per hour for members of this team (cost reports), unless the user has their own rate.
+    hourly_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class User(TenantScoped, Base):
@@ -81,6 +87,19 @@ class User(TenantScoped, Base):
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     oidc_subject: Mapped[str | None] = mapped_column(String(255), nullable=True)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Local password (scrypt), for sign-in without SSO. None means the user signs in with SSO only.
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Tokens issued before this moment are rejected, so a password change signs out every session.
+    password_changed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    failed_logins: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # "Sign out everywhere": tokens issued before this moment are rejected.
+    sessions_revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Platform operators can create and manage tenants (/v1/platform). Set for the bootstrap admin.
+    is_platform_admin: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
+    email_notifications: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1", nullable=False)
+    hourly_rate: Mapped[float | None] = mapped_column(Float, nullable=True)  # overrides the team and tenant rates
+    erased_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # personal data removed (GDPR)
 
 
 class SourceApp(TenantScoped, Base):
@@ -96,6 +115,10 @@ class SourceApp(TenantScoped, Base):
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     # api: an external application. portal: the built-in web upload app, one per tenant.
     kind: Mapped[str] = mapped_column(String(20), default="api", server_default="api", nullable=False)
+    # After a key rotation the previous key keeps working until previous_key_expires_at (grace period).
+    previous_key_prefix: Mapped[str | None] = mapped_column(String(16), index=True, nullable=True)
+    previous_key_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    previous_key_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 # --- Workflows --------------------------------------------------------------------------
@@ -150,6 +173,11 @@ class Submission(TenantScoped, Base):
     final_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     released_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     processing_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    processing_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    retry_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # next processing attempt
+    # Content removed under the tenant's retention policy (or on request). Decisions, scores, audit and
+    # the evidence pack are kept.
+    purged_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     documents: Mapped[list[Document]] = relationship(back_populates="submission", order_by="Document.created_at")
 
@@ -357,10 +385,53 @@ class ConnectorConfig(TenantScoped, Base):
     __tablename__ = "connector_configs"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     source_app_id: Mapped[str] = mapped_column(String(36), ForeignKey("source_apps.id"), nullable=False)
-    kind: Mapped[str] = mapped_column(String(20), nullable=False)  # sharepoint | teams | jira
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)  # sharepoint | teams | jira | azure_devops
+    # Secret fields are stored encrypted (services/secretbox.py).
     config: Mapped[dict] = mapped_column(JSONType, default=dict, nullable=False)
     state: Mapped[dict] = mapped_column(JSONType, default=dict, nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+# --- Usage, sessions and account recovery ----------------------------------------------
+
+
+class ModelCall(TenantScoped, Base):
+    """One LLM call through the model gateway, with token usage for cost reports."""
+
+    __tablename__ = "model_calls"
+    __table_args__ = (Index("ix_model_calls_tenant_time", "tenant_id", "created_at"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    submission_id: Mapped[str | None] = mapped_column(String(36), index=True, nullable=True)
+    agent: Mapped[str] = mapped_column(String(100), nullable=False)
+    provider: Mapped[str] = mapped_column(String(30), nullable=False)
+    model: Mapped[str] = mapped_column(String(200), nullable=False)
+    ok: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    latency_ms: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    cache_read_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    cache_write_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class RevokedToken(TenantScoped, Base):
+    """Sign-in tokens revoked before they expire (sign-out). Rows can be dropped once expires_at has passed."""
+
+    __tablename__ = "revoked_tokens"
+    jti: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True, nullable=False)
+
+
+class PasswordResetToken(TenantScoped, Base):
+    __tablename__ = "password_reset_tokens"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), index=True, nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 # --- Append-only guard ------------------------------------------------------------------

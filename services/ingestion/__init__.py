@@ -13,13 +13,14 @@ from services.config import get_settings
 from services.ingestion import extractors
 from services.ingestion.conversion import ConversionUnavailable, convert_ppt_to_pptx
 from services.ingestion.extractors import ExtractionError, NormalizedDoc
-from services.ingestion.scanning import MIME, UnsupportedType, VirusFound, detect_format, scan
+from services.ingestion.scanning import MIME, ScanUnavailable, UnsupportedType, VirusFound, detect_format, scan
 from services.storage import get_storage
 
 __all__ = [
     "ConversionUnavailable",
     "ExtractionError",
     "IngestionError",
+    "ScanUnavailable",
     "UnsupportedType",
     "VirusFound",
     "content_hash",

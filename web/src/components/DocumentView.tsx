@@ -1,5 +1,8 @@
 // Faithful rendered view of the normalised document: pages as pages, slides as slides, documents as a page of text.
-// Risk flags, comments and citations are overlaid on the stable span ids.
+// Risk flags, comments and citations are overlaid on the stable span ids. Every passage is keyboard-selectable
+// (Tab to it, Enter or Space to select).
+
+import "../pages/review.css";
 
 export type SpanT = { id: string; kind: string; text: string; location: any };
 export type SectionT = { id: string; kind: string; title: string | null; location: any; spans: SpanT[] };
@@ -8,16 +11,35 @@ export type CommentT = { id: string; span_id: string | null; kind: string; body:
 
 const SEV = { high: 2, medium: 1, low: 0 } as Record<string, number>;
 
+// Enter or Space activates a non-button element that has role="button" (as a native button would).
+export function activateOnKey(fn: () => void) {
+  return (e: React.KeyboardEvent<HTMLElement>) => {
+    if (e.target !== e.currentTarget) return;
+    if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
+      e.preventDefault();
+      fn();
+    }
+  };
+}
+
 function SpanEl({ span, flags, selected, cited, commented, onSelect }: {
   span: SpanT; flags: FlagT[]; selected: boolean; cited: boolean; commented: boolean; onSelect: (id: string) => void;
 }) {
-  const top = flags.sort((a, b) => SEV[b.severity] - SEV[a.severity])[0];
+  const top = [...flags].sort((a, b) => SEV[b.severity] - SEV[a.severity])[0];
   const cls = [
     "span", `span-${span.kind}`, top ? `flag-${top.severity}` : "", selected ? "selected" : "", cited ? "cited" : "",
     commented ? "has-comment" : "",
   ].join(" ");
+  const notes = [
+    top ? `${top.severity} risk flag: ${top.category.replace(/_/g, " ")}` : "",
+    cited ? "cited in decision" : "",
+    commented ? "has your comment" : "",
+  ].filter(Boolean);
   return (
-    <div className={cls} data-span-id={span.id} onClick={() => onSelect(span.id)} title={top ? `${top.category.replace(/_/g, " ")}: ${top.rationale}` : undefined}>
+    <div className={cls} data-span-id={span.id} role="button" tabIndex={0} aria-pressed={selected}
+      aria-label={notes.length ? `${span.text} (${notes.join(", ")})` : undefined}
+      onClick={() => onSelect(span.id)} onKeyDown={activateOnKey(() => onSelect(span.id))}
+      title={top ? `${top.category.replace(/_/g, " ")}: ${top.rationale}` : undefined}>
       {span.text}
     </div>
   );

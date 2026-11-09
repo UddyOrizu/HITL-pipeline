@@ -1,5 +1,7 @@
-# Local stack: Postgres + TimescaleDB, Redis, MinIO, LibreOffice worker, API (serves the web app) and worker.
+# Local stack: Postgres + TimescaleDB, Redis, MinIO, LibreOffice worker, ClamAV, Mailpit (catches email),
+# API (serves the web app) and worker.
 # Usage (from the repo root):  docker compose -f infra/docker-compose.yml up --build
+# Hosted MCP server too:       POR_MCP_API_KEY=por_... docker compose -f infra/docker-compose.yml --profile mcp up
 name: proof-of-review
 
 x-app-env: &app-env
@@ -14,6 +16,13 @@ x-app-env: &app-env
   POR_S3_ACCESS_KEY: por
   POR_S3_SECRET_KEY: por-minio-secret
   POR_LIBREOFFICE_URL: http://libreoffice:8100
+  POR_CLAMAV_HOST: clamav
+  POR_SMTP_HOST: mailpit
+  POR_SMTP_PORT: "1025"
+  POR_SMTP_STARTTLS: "false"
+  POR_CORS_ORIGINS: ${POR_CORS_ORIGINS:-}
+  POR_BOOTSTRAP_ADMIN_EMAIL: ${POR_BOOTSTRAP_ADMIN_EMAIL:-}
+  POR_BOOTSTRAP_ADMIN_PASSWORD: ${POR_BOOTSTRAP_ADMIN_PASSWORD:-}
   POR_MODEL_PROVIDER: ${POR_MODEL_PROVIDER:-heuristic}
   POR_MODEL_ID: ${POR_MODEL_ID:-claude-sonnet-5-5}
   POR_MODEL_API_KEY: ${POR_MODEL_API_KEY:-}
@@ -49,6 +58,19 @@ services:
     build: ./libreoffice
     ports: ["8100:8100"]
 
+  clamav:
+    image: clamav/clamav:stable
+    ports: ["3310:3310"]
+    healthcheck:
+      test: ["CMD", "clamdcheck.sh"]
+      interval: 30s
+      retries: 20
+      start_period: 120s  # the first virus database download takes a while
+
+  mailpit:
+    image: axllent/mailpit:v1.21
+    ports: ["8025:8025", "1025:1025"]  # web inbox on http://localhost:8025
+
   api:
     build:
       context: ..
@@ -59,6 +81,7 @@ services:
       postgres: {condition: service_healthy}
       redis: {condition: service_started}
       minio: {condition: service_started}
+      clamav: {condition: service_healthy}
 
   worker:
     build:
@@ -66,6 +89,20 @@ services:
       dockerfile: Dockerfile
     command: ["python", "-m", "services.worker"]
     environment: *app-env
+    depends_on: [api]
+
+  mcp:
+    profiles: [mcp]
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    command: ["python", "-m", "mcp_server.server", "--http"]
+    environment:
+      POR_MCP_API_URL: http://api:8000
+      POR_MCP_API_KEY: ${POR_MCP_API_KEY:?set POR_MCP_API_KEY to a source app key}
+      POR_MCP_PORT: "8000"
+      POR_MCP_HOST: 0.0.0.0
+    ports: ["8001:8000"]
     depends_on: [api]
 
 volumes:

@@ -112,9 +112,9 @@ def test_no_provider_sdk_calls_outside_the_gateway():
     banned = ("import anthropic", "from anthropic", "import openai", "from openai", "agno.models")
     for path in root.rglob("*.py"):
         rel = path.relative_to(root)
-        if rel.parts[0] in (".venv", "tests", "web") or str(rel) == "services/model_gateway.py":
+        if rel.parts[0] in (".venv", "tests", "web", "var", "node_modules") or rel.as_posix() == "services/model_gateway.py":
             continue
-        source = path.read_text()
+        source = path.read_text(encoding="utf-8")
         for b in banned:
             assert b not in source, f"{rel} calls a provider SDK directly ({b})"
 

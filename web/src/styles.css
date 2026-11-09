@@ -191,3 +191,33 @@ pre.json { background: var(--surface-2); border-radius: 8px; padding: 12px; over
   .grid-2, .grid-4 { grid-template-columns: 1fr; }
   .doc, .page, .slide { padding: 20px; }
 }
+
+/* Shared additions */
+.pager { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+.modal-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; margin-bottom: 14px; }
+.toolbar > * { width: auto; }
+.toolbar label { margin: 0 0 4px; }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; font-size: 13px; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; }
+.drawer { position: fixed; inset: 0 0 0 auto; width: min(720px, 100vw); background: var(--surface); border-left: 1px solid var(--border); box-shadow: var(--shadow); padding: 20px 24px; overflow-y: auto; z-index: 40; }
+.drawer-back { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.25); z-index: 39; }
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 16px; flex-wrap: wrap; }
+.tabs button { border: none; background: none; font: inherit; padding: 8px 12px; color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent; }
+.tabs button[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+.chart { width: 100%; height: auto; display: block; }
+.chart text { fill: var(--muted); font-size: 11px; font-family: var(--font); }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; }
+  .nav { position: static; height: auto; border-right: none; border-bottom: 1px solid var(--border); }
+  .main { padding: 20px 16px; }
+  .grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .grid-2, .workspace { grid-template-columns: 1fr; }
+}
+.divider { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; margin: 4px 0 6px; }
+.divider::before, .divider::after { content: ""; flex: 1; border-top: 1px solid var(--border); }
+.linklike { background: none; border: none; padding: 0; color: var(--accent); font: inherit; font-size: 13px; cursor: pointer; }
+.linklike:hover { text-decoration: underline; }

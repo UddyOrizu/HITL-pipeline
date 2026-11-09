@@ -23,7 +23,7 @@ DEFAULT_CAPS = {
 
 
 def caps_for(workflow: Workflow) -> dict:
-    return {**DEFAULT_CAPS, **(workflow.cap_policy or {})}
+    return {**DEFAULT_CAPS, **{k: v for k, v in (workflow.cap_policy or {}).items() if v is not None}}
 
 
 def word_count(session: Session, submission: Submission) -> int:

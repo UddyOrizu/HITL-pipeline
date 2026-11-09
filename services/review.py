@@ -148,8 +148,9 @@ def task_view(session: Session, user: User, task_id: str) -> dict:
                  "due_at": task.due_at.isoformat() + "Z" if task.due_at else None, "effort_minutes": task.effort_minutes},
         "submission": {"id": sub.id, "title": (sub.meta or {}).get("title") or doc.filename, "risk_tier": sub.risk_tier,
                        "content_origin": sub.content_origin, "ai_model": sub.ai_model, "workflow": wf.name,
-                       "external_ref": sub.external_ref,
-                       "reference_documents": [d.filename for d in sub.documents if d.role == "reference"]},
+                       "external_ref": sub.external_ref, "previous_submission_id": sub.previous_submission_id,
+                       "reference_documents": [{"id": d.id, "filename": d.filename, "render_kind": d.render_kind}
+                                               for d in sub.documents if d.role == "reference"]},
         "document": {"id": doc.id, "filename": doc.filename, "render_kind": doc.render_kind, "sections": list(sections.values())},
         "flags": flags,
         "comments": comments,
@@ -157,6 +158,37 @@ def task_view(session: Session, user: User, task_id: str) -> dict:
         "policy": {**telemetry.DEFAULT_POLICY, **(wf.telemetry_policy or {})},
         "telemetry": summary,
     }
+
+
+def references(session: Session, user: User, task_id: str) -> list[dict]:
+    from services import ingestion
+
+    task = _task_for(session, user, task_id)
+    sub = session.get(Submission, task.submission_id)
+    out = []
+    for d in sub.documents:
+        if d.role != "reference":
+            continue
+        sections: list[dict] = []
+        for sec, sp in ingestion.original_spans(session, d.id):
+            if not sections or sections[-1]["id"] != sec.id:
+                sections.append({"id": sec.id, "kind": sec.kind, "title": sec.title, "spans": []})
+            sections[-1]["spans"].append({"id": sp.id, "kind": sp.kind, "text": sp.text})
+        out.append({"id": d.id, "filename": d.filename, "render_kind": d.render_kind, "mime_type": d.mime_type,
+                    "sections": sections, "available": not d.original_file_uri.startswith("purged:")})
+    return out
+
+
+def reference_file(session: Session, user: User, task_id: str, document_id: str):
+    from services.storage import get_storage
+
+    task = _task_for(session, user, task_id)
+    doc = session.get(Document, document_id)
+    if doc is None or doc.submission_id != task.submission_id or doc.role != "reference":
+        raise ReviewError("reference document not found", "not_found")
+    if doc.original_file_uri.startswith("purged:"):
+        raise ReviewError("this document has been removed under the retention policy", "not_found")
+    return doc, get_storage().get(doc.original_file_uri)
 
 
 def _flag_for(session: Session, task: ReviewTask, flag_id: str) -> RiskFlag:
