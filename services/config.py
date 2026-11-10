@@ -2,7 +2,11 @@
 
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+ENVIRONMENTS = ("dev", "test", "prod")
+DEFAULT_SECRET_KEY = "dev-only-insecure-secret-change-me-in-production"
 
 
 def _split(value: str | None) -> list[str]:
@@ -14,13 +18,16 @@ class Settings(BaseSettings):
 
     env: str = "dev"  # dev | test | prod
     database_url: str = "sqlite:///./var/por.db"
-    secret_key: str = "dev-only-insecure-secret-change-me-in-production"
+    secret_key: str = DEFAULT_SECRET_KEY
     # Key for encrypting stored secrets (connector credentials, tenant SSO client secrets). Defaults to a key
     # derived from secret_key; set it separately so rotating one does not affect the other.
     encryption_key: str | None = None
     public_base_url: str = "http://localhost:8000"
     # Where people open the web app (SSO redirects, links in emails). Defaults to public_base_url.
     app_base_url: str | None = None
+    # How background workers and connectors reach the API from inside the deployment (for example
+    # http://api:8000 in Docker Compose). Defaults to public_base_url.
+    internal_api_url: str | None = None
 
     # Browser origins allowed to call the API directly (comma-separated). Empty means same-origin only, which is
     # what the bundled web app needs (it is served by the API, or proxied by Vite in development).
@@ -43,6 +50,9 @@ class Settings(BaseSettings):
     s3_bucket: str | None = None
     s3_access_key: str | None = None
     s3_secret_key: str | None = None
+    # Server-side encryption header sent with S3 uploads (AES256 or aws:kms). Empty turns it off, which MinIO
+    # without a KMS needs.
+    s3_server_side_encryption: str | None = "AES256"
     azure_storage_account_url: str | None = None  # https://<account>.blob.core.windows.net (managed identity)
     azure_storage_container: str = "por-files"
 
@@ -115,9 +125,22 @@ class Settings(BaseSettings):
     metrics_token: str | None = None  # when set, GET /metrics needs "Authorization: Bearer <token>"
     log_format: str = "text"  # text | json
     sentry_dsn: str | None = None
+    # Port on which the background worker serves its own /metrics (Prometheus). Off when unset.
+    worker_metrics_port: int | None = None
 
     # Reading speed used for expected review time and effort estimates.
     words_per_minute: int = 200
+
+    @field_validator("env", mode="before")
+    @classmethod
+    def _check_env(cls, value):
+        """dev, test or prod (any case; "production" means prod). Anything else stops start-up, so a typo can't
+        quietly turn off the production checks."""
+        v = str(value or "dev").strip().lower()
+        v = {"production": "prod", "development": "dev"}.get(v, v)
+        if v not in ENVIRONMENTS:
+            raise ValueError(f"POR_ENV must be one of {', '.join(ENVIRONMENTS)} (got {value!r})")
+        return v
 
     # --- Derived values ---------------------------------------------------------------
 
@@ -132,6 +155,11 @@ class Settings(BaseSettings):
     @property
     def app_url(self) -> str:
         return (self.app_base_url or self.public_base_url).rstrip("/")
+
+    @property
+    def api_url(self) -> str:
+        """Base URL for server-side calls to this API (connectors, workers)."""
+        return (self.internal_api_url or self.public_base_url).rstrip("/")
 
     @property
     def virus_scan_required(self) -> bool:

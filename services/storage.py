@@ -36,7 +36,8 @@ class LocalStorage(Storage):
 
     def _path(self, key: str) -> Path:
         path = (self.root / key).resolve()
-        if not str(path).startswith(str(self.root)):
+        # is_relative_to, not a string prefix: /data/storage-other must not pass for root /data/storage.
+        if path == self.root or not path.is_relative_to(self.root):
             raise ValueError("invalid storage key")
         return path
 
@@ -59,27 +60,42 @@ class LocalStorage(Storage):
         return f"{get_settings().public_base_url}/v1/files/{quote(key)}?exp={exp}&sig={sig}"
 
 
-class S3Storage(Storage):
-    def __init__(self):
-        import boto3
+def _error_code(exc: Exception) -> str:
+    """The error code of a botocore ClientError (e.g. "404", "NoSuchBucket", "403"), or "" for anything else."""
+    response = getattr(exc, "response", None) or {}
+    code = str((response.get("Error") or {}).get("Code") or "")
+    status = (response.get("ResponseMetadata") or {}).get("HTTPStatusCode")
+    return code or (str(status) if status else "")
 
+
+class S3Storage(Storage):
+    def __init__(self, client=None):
         s = get_settings()
         self.bucket = s.s3_bucket
-        self.client = boto3.client(
-            "s3",
-            endpoint_url=s.s3_endpoint,
-            aws_access_key_id=s.s3_access_key,
-            aws_secret_access_key=s.s3_secret_key,
-        )
+        # Empty POR_S3_SERVER_SIDE_ENCRYPTION sends no header (MinIO without a KMS rejects it).
+        self.sse = (s.s3_server_side_encryption or "").strip() or None
+        if client is None:
+            import boto3
+
+            client = boto3.client(
+                "s3",
+                endpoint_url=s.s3_endpoint,
+                aws_access_key_id=s.s3_access_key,
+                aws_secret_access_key=s.s3_secret_key,
+            )
+        self.client = client
         try:
             self.client.head_bucket(Bucket=self.bucket)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:
+            # Create the bucket only when it does not exist. Anything else (wrong credentials, no permission,
+            # endpoint down) is a configuration error that must surface, not be papered over.
+            if _error_code(exc) not in ("404", "NoSuchBucket", "NotFound"):
+                raise
             self.client.create_bucket(Bucket=self.bucket)
 
     def put(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> str:
-        self.client.put_object(
-            Bucket=self.bucket, Key=key, Body=data, ContentType=content_type, ServerSideEncryption="AES256"
-        )
+        extra = {"ServerSideEncryption": self.sse} if self.sse else {}
+        self.client.put_object(Bucket=self.bucket, Key=key, Body=data, ContentType=content_type, **extra)
         return f"s3://{self.bucket}/{key}"
 
     def get(self, uri: str) -> bytes:
@@ -100,27 +116,37 @@ class AzureBlobStorage(Storage):
     """Azure Blob Storage with the app's managed identity (DefaultAzureCredential): no account keys in config.
     Needs the azure extra: pip install -e ".[azure]"."""
 
-    def __init__(self):
-        from azure.identity import DefaultAzureCredential
-        from azure.storage.blob import BlobServiceClient
-
+    def __init__(self, service=None):
         s = get_settings()
         self.account_url = s.azure_storage_account_url.rstrip("/")
         self.container = s.azure_storage_container
-        self.service = BlobServiceClient(self.account_url, credential=DefaultAzureCredential())
+        if service is None:
+            from azure.identity import DefaultAzureCredential
+            from azure.storage.blob import BlobServiceClient
+
+            service = BlobServiceClient(self.account_url, credential=DefaultAzureCredential())
+        self.service = service
         self.client = self.service.get_container_client(self.container)
-        try:
-            self.client.create_container()
-        except Exception:  # noqa: BLE001  (already exists, or no permission to create: it must exist then)
-            pass
+        # Create the container only when it is missing. Wrong credentials or a missing role assignment must
+        # surface here, not on the first upload.
+        if not self.client.exists():
+            try:
+                self.client.create_container()
+            except Exception as exc:
+                if _azure_status(exc) != 409:  # 409: created meanwhile by another replica
+                    raise
 
     def _name(self, uri: str) -> str:
         return uri.removeprefix(f"azblob://{self.container}/")
 
     def put(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> str:
-        from azure.storage.blob import ContentSettings
+        try:
+            from azure.storage.blob import ContentSettings
 
-        self.client.upload_blob(key, data, overwrite=True, content_settings=ContentSettings(content_type=content_type))
+            settings = ContentSettings(content_type=content_type)
+        except ImportError:  # tests with a fake client
+            settings = None
+        self.client.upload_blob(key, data, overwrite=True, content_settings=settings)
         return f"azblob://{self.container}/{key}"
 
     def get(self, uri: str) -> bytes:
@@ -141,6 +167,10 @@ class AzureBlobStorage(Storage):
         sas = generate_blob_sas(self.service.account_name, self.container, name, user_delegation_key=key,
                                 permission=BlobSasPermissions(read=True), expiry=expiry, start=start)
         return f"{self.account_url}/{self.container}/{quote(name)}?{sas}"
+
+
+def _azure_status(exc: Exception) -> int | None:
+    return getattr(exc, "status_code", None)
 
 
 def sign_file_key(key: str, exp: int) -> str:

@@ -361,6 +361,10 @@ class EvidencePack(TenantScoped, Base):
     json_uri: Mapped[str] = mapped_column(String(2000), nullable=False)
     sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     generated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    # The tenant audit chain's head (seq, hash) when the record was built. Kept outside the chain, so a full
+    # verification can tell when events after an issued evidence pack were removed (tail truncation).
+    audit_head_seq: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    audit_head_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 # --- Integrations -----------------------------------------------------------------------
@@ -432,6 +436,25 @@ class PasswordResetToken(TenantScoped, Base):
     token_hash: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+# --- Transactional outbox -----------------------------------------------------------------
+
+
+class OutboxMessage(Base):
+    """An event written in the same transaction as the change that caused it, then copied to Redis Streams.
+
+    Platform plumbing rather than tenant data, so it has no tenant_id (and no row-level security): the payload is
+    what the event handlers receive. Rows are pruned a few days after they were published."""
+
+    __tablename__ = "event_outbox"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    stream: Mapped[str] = mapped_column(String(64), nullable=False)
+    fields: Mapped[dict] = mapped_column(JSONType, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True, nullable=False)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime, index=True, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 # --- Append-only guard ------------------------------------------------------------------

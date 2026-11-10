@@ -6,18 +6,26 @@ from __future__ import annotations
 import hashlib
 import secrets
 import time
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
+from typing import Literal
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from api.deps import ROLES, UserPrincipal, current_user, effective_roles, get_db
+from api.deps import ROLES, UserPrincipal, current_user, effective_roles, get_db, session_revocation_id
 from db.models import PasswordResetToken, RevokedToken, SourceApp, Tenant, User, utcnow
 from services import audit, mailer, passwords, ratelimit, sso
 from services.config import get_settings
-from services.security import constant_time_equal, hash_secret, issue_token
+from services.security import (
+    constant_time_equal,
+    decode_token,
+    hash_secret,
+    issue_token,
+    oauth_fingerprint,
+    session_expiry,
+)
 
 router = APIRouter(prefix="/v1", tags=["auth"])
 
@@ -31,14 +39,21 @@ def _user_out(u: User, db: Session) -> dict:
             "tenant": {"id": tenant.id, "name": tenant.name} if tenant else None}
 
 
-def _login(db: Session, user: User, method: str) -> dict:
+def _expires_in(token: str) -> int:
+    return max(0, int(decode_token(token)["exp"]) - int(time.time()))
+
+
+def _login(db: Session, user: User, method: str, chan: str = "ui") -> dict:
+    """Start a session. The web app's sign-in flows get chan=ui tokens; raw ID token sign-in (native clients) gets
+    chan=api, which can never pass as the review workspace."""
     tenant = db.get(Tenant, user.tenant_id)
     if tenant is None or not tenant.active:
         raise HTTPException(403, "this organisation's account is not active")
     user.last_login_at = utcnow()
-    audit.record(db, user.tenant_id, f"user:{user.id}", "user.signed_in", "user", user.id, {"method": method})
-    return {"access_token": issue_token(user.id, user.tenant_id, "user", user.roles), "token_type": "bearer",
-            "expires_in": get_settings().token_ttl_minutes * 60, "user": _user_out(user, db)}
+    audit.record(db, user.tenant_id, f"user:{user.id}", "user.signed_in", "user", user.id,
+                 {"method": method, "channel": chan})
+    token = issue_token(user.id, user.tenant_id, "user", user.roles, chan=chan)
+    return {"access_token": token, "token_type": "bearer", "expires_in": _expires_in(token), "user": _user_out(user, db)}
 
 
 def _choose_tenant(db: Session, users: list[User], extra: dict | None = None) -> HTTPException:
@@ -104,20 +119,28 @@ def password_login(body: PasswordLoginIn, db: Session = Depends(get_db)):
 
     now = utcnow()
     matched: list[User] = []
+    failed: list[User] = []
     for user in candidates:
         if user.locked_until and user.locked_until > now:
             passwords.burn_time(body.password)
             continue
         if passwords.verify_password(body.password, user.password_hash):
             matched.append(user)
-            continue
-        user.failed_logins = (user.failed_logins or 0) + 1
-        locked = user.failed_logins >= s.login_max_attempts
-        if locked:
-            user.locked_until = now + timedelta(minutes=s.login_lockout_minutes)
-            user.failed_logins = 0
-        audit.record(db, user.tenant_id, "anonymous", "user.sign_in_failed", "user", user.id,
-                     {"method": "password", "locked": locked})
+        else:
+            failed.append(user)
+
+    # The same email can have accounts in several organisations with different passwords. A failure only counts
+    # when the password matched none of them: the right password for one account must not lock, or write failed
+    # sign-ins into, the person's accounts elsewhere.
+    if not matched:
+        for user in failed:
+            user.failed_logins = (user.failed_logins or 0) + 1
+            locked = user.failed_logins >= s.login_max_attempts
+            if locked:
+                user.locked_until = now + timedelta(minutes=s.login_lockout_minutes)
+                user.failed_logins = 0
+            audit.record(db, user.tenant_id, "anonymous", "user.sign_in_failed", "user", user.id,
+                         {"method": "password", "locked": locked})
 
     if len(matched) > 1:
         db.commit()
@@ -160,6 +183,8 @@ def _provision(db: Session, provider: sso.Provider, email: str, claims: dict) ->
     roles = [r for r in provider.auto_provision_roles if r in ROLES and r != "admin"]
     if not (provider.tenant_id and roles):
         return None
+    if db.scalars(select(User).where(User.tenant_id == provider.tenant_id, User.email == email)).first():
+        return None  # an account exists (inactive, or linked to another identity): never create a second one
     u = User(tenant_id=provider.tenant_id, email=email, name=(claims.get("name") or "").strip()[:200], roles=roles,
              team_ids=[], active=True, oidc_subject=claims.get("sub"))
     db.add(u)
@@ -169,28 +194,38 @@ def _provision(db: Session, provider: sso.Provider, email: str, claims: dict) ->
     return u
 
 
-def _sso_sign_in(db: Session, users: list[User], email: str, subject: str | None) -> dict:
+def _sso_sign_in(db: Session, users: list[User], email: str, subject: str | None, chan: str = "ui") -> dict:
     if len(users) > 1:
         raise _choose_tenant(db, users, {"ticket": sso.ticket(email, subject, [u.tenant_id for u in users])})
     user = users[0]
     if user.oidc_subject and user.oidc_subject != subject:
         raise HTTPException(403, "this sign-in does not match the identity linked to the account")
     user.oidc_subject = subject
-    return _login(db, user, "sso")
+    return _login(db, user, "sso", chan)
+
+
+def _no_account(db: Session, provider: sso.Provider, email: str, verified: bool) -> HTTPException:
+    if sso.blocked_by_enforcement(db, provider, email):
+        return HTTPException(403, "your organisation requires its own single sign-on: enter your work email on the "
+                                  "sign-in page to use it")
+    if not verified:
+        return HTTPException(403, "the identity provider has not confirmed this email address, so it can't be linked "
+                                  "to an account; ask your administrator")
+    return HTTPException(403, f"there is no account for {email}; ask your administrator to add you")
 
 
 @router.post("/auth/sso/callback", dependencies=[Depends(ratelimit.auth_limit("sso"))])
 def sso_callback(body: SsoCallbackIn, db: Session = Depends(get_db)):
     try:
         provider, claims = sso.complete(db, body.code, body.state, body.code_verifier)
-        email = sso.identity_email(claims)
+        email, verified = sso.identity(provider, claims)
     except sso.SsoError as exc:
         raise HTTPException(exc.status, str(exc)) from None
-    users = sso.candidates(db, provider, email, claims.get("sub"))
+    users = sso.candidates(db, provider, email, claims.get("sub"), verified)
     if not users:
         new = _provision(db, provider, email, claims)
         if new is None:
-            raise HTTPException(403, f"there is no account for {email}; ask your administrator to add you")
+            raise _no_account(db, provider, email, verified)
         users = [new]
     return _sso_sign_in(db, users, email, claims.get("sub"))
 
@@ -213,7 +248,7 @@ def sso_choose(body: SsoChooseIn, db: Session = Depends(get_db)):
                                                        User.active.is_(True))).all()]
     if not users:
         raise HTTPException(403, "the account is no longer active")
-    return _sso_sign_in(db, users[:1], t["email"], t.get("sub"))
+    return _sso_sign_in(db, users[:1], t["email"], t.get("sub"), t.get("chan") or "ui")
 
 
 class OidcIn(BaseModel):
@@ -223,50 +258,69 @@ class OidcIn(BaseModel):
 
 @router.post("/auth/oidc", dependencies=[Depends(ratelimit.auth_limit("sso"))])
 def oidc_login(body: OidcIn, db: Session = Depends(get_db)):
-    """For native and command-line clients that already hold an ID token from the platform's identity provider."""
+    """For native and command-line clients that already hold an ID token from the platform's identity provider.
+    The token is an api-channel token: it cannot record decisions as the web review workspace."""
     provider = sso.platform_provider()
     if provider is None:
         raise HTTPException(404, "single sign-on is not configured")
     try:
         claims = sso.verify_id_token(provider, body.id_token)
-        email = sso.identity_email(claims)
+        email, verified = sso.identity(provider, claims)
     except sso.SsoError as exc:
         raise HTTPException(exc.status, str(exc)) from None
-    users = sso.candidates(db, provider, email, claims.get("sub"))
+    users = sso.candidates(db, provider, email, claims.get("sub"), verified)
     if body.tenant_id:
         users = [u for u in users if u.tenant_id == body.tenant_id]
     if not users:
         raise HTTPException(403, "no platform account for this identity")
     if len(users) > 1:
         raise _choose_tenant(db, users)
-    return _sso_sign_in(db, users, email, claims.get("sub"))
+    return _sso_sign_in(db, users, email, claims.get("sub"), chan="api")
 
 
 # --- Sessions ---------------------------------------------------------------------------
 
 
+def _naive(ts: int) -> datetime:
+    return datetime.fromtimestamp(int(ts), UTC).replace(tzinfo=None)
+
+
+def _revoke(db: Session, jti: str, principal: UserPrincipal, expires: int) -> None:
+    if db.get(RevokedToken, jti) is None:
+        db.add(RevokedToken(jti=jti, user_id=principal.user.id, tenant_id=principal.tenant_id, expires_at=_naive(expires)))
+
+
+def _auth_time(claims: dict) -> int:
+    return int(claims.get("auth_time") or claims.get("iat") or 0)
+
+
 @router.post("/auth/refresh")
-def refresh(request: Request, principal: UserPrincipal = Depends(current_user)):
-    """A fresh token for an active session, up to POR_SESSION_MAX_HOURS after the person signed in."""
+def refresh(request: Request, principal: UserPrincipal = Depends(current_user), db: Session = Depends(get_db)):
+    """A fresh token for an active session, up to POR_SESSION_MAX_HOURS after the person signed in. The new token
+    keeps the session id and channel (an mcp or api token stays one), and the token it replaces stops working."""
     claims = request.state.token_claims
-    auth_time = int(claims.get("auth_time") or claims.get("iat") or 0)
+    auth_time = _auth_time(claims)
     s = get_settings()
     if time.time() - auth_time > s.session_max_hours * 3600:
         raise HTTPException(401, "session has reached its maximum length; sign in again")
     u = principal.user
-    return {"access_token": issue_token(u.id, u.tenant_id, "user", u.roles, auth_time=auth_time), "token_type": "bearer",
-            "expires_in": s.token_ttl_minutes * 60}
+    token = issue_token(u.id, u.tenant_id, "user", u.roles, auth_time=auth_time, chan=claims.get("chan"),
+                        sid=claims.get("sid"))
+    if claims.get("jti"):
+        _revoke(db, claims["jti"], principal, int(claims["exp"]))
+    return {"access_token": token, "token_type": "bearer", "expires_in": _expires_in(token)}
 
 
 @router.post("/auth/logout", status_code=204)
 def logout(request: Request, principal: UserPrincipal = Depends(current_user), db: Session = Depends(get_db)):
-    """Revoke this session's token."""
+    """End this session: this token, the tokens it was refreshed from and into, and tokens issued from it
+    (POST /v1/me/tokens). Other sign-ins stay signed in."""
     claims = request.state.token_claims
-    if claims.get("jti") and db.get(RevokedToken, claims["jti"]) is None:
-        from datetime import UTC, datetime
-
-        db.add(RevokedToken(jti=claims["jti"], user_id=principal.user.id, tenant_id=principal.tenant_id,
-                            expires_at=datetime.fromtimestamp(int(claims["exp"]), UTC).replace(tzinfo=None)))
+    if claims.get("jti"):
+        _revoke(db, claims["jti"], principal, int(claims["exp"]))
+    if claims.get("sid"):
+        _revoke(db, session_revocation_id(claims["sid"]), principal,
+                max(int(claims["exp"]), session_expiry(_auth_time(claims))))
     audit.record(db, principal.tenant_id, f"user:{principal.user.id}", "user.signed_out", "user", principal.user.id, {})
 
 
@@ -276,6 +330,32 @@ def logout_all(principal: UserPrincipal = Depends(current_user), db: Session = D
     principal.user.sessions_revoked_at = utcnow()
     audit.record(db, principal.tenant_id, f"user:{principal.user.id}", "user.sessions_revoked", "user",
                  principal.user.id, {"by": "self"})
+
+
+class TokenIn(BaseModel):
+    channel: Literal["mcp", "api"]
+    ttl_minutes: int | None = Field(None, ge=1)
+
+
+@router.post("/me/tokens", status_code=201)
+def issue_client_token(body: TokenIn, request: Request, principal: UserPrincipal = Depends(current_user),
+                       db: Session = Depends(get_db)):
+    """A token for another client of yours, such as the MCP server in reviewer mode (channel mcp) or a script
+    (channel api). It is part of this session: signing out, or signing out everywhere, ends it, and it lasts no longer
+    than the session. Decisions made with it are always recorded as that channel. Only the web app (a ui token) can
+    ask for one."""
+    claims = request.state.token_claims
+    if claims.get("chan") != "ui":
+        raise HTTPException(403, "client tokens can only be created from the web app")
+    s = get_settings()
+    ttl = min(body.ttl_minutes or s.token_ttl_minutes, s.token_ttl_minutes)
+    u = principal.user
+    token = issue_token(u.id, u.tenant_id, "user", u.roles, ttl_minutes=ttl, auth_time=_auth_time(claims),
+                        chan=body.channel, sid=claims.get("sid"))
+    expires_in = _expires_in(token)
+    audit.record(db, u.tenant_id, f"user:{u.id}", "user.token_issued", "user", u.id,
+                 {"channel": body.channel, "expires_in": expires_in})
+    return {"access_token": token, "token_type": "bearer", "expires_in": expires_in, "channel": body.channel}
 
 
 # --- Your account -----------------------------------------------------------------------
@@ -310,7 +390,7 @@ class PasswordChangeIn(BaseModel):
 
 
 @router.post("/me/password")
-def change_own_password(body: PasswordChangeIn, principal: UserPrincipal = Depends(current_user),
+def change_own_password(body: PasswordChangeIn, request: Request, principal: UserPrincipal = Depends(current_user),
                         db: Session = Depends(get_db)):
     """Set or change your own password. Other sessions are signed out; the response carries a new token."""
     user = principal.user
@@ -321,7 +401,10 @@ def change_own_password(body: PasswordChangeIn, principal: UserPrincipal = Depen
     except passwords.PasswordPolicyError as exc:
         raise HTTPException(422, str(exc)) from None
     passwords.set_password(db, user, body.new_password, f"user:{user.id}", "self")
-    return {"access_token": issue_token(user.id, user.tenant_id, "user", user.roles), "token_type": "bearer"}
+    claims = request.state.token_claims
+    token = issue_token(user.id, user.tenant_id, "user", user.roles, auth_time=_auth_time(claims),
+                        chan=claims.get("chan"), sid=claims.get("sid"))
+    return {"access_token": token, "token_type": "bearer", "expires_in": _expires_in(token)}
 
 
 # --- Forgotten passwords ----------------------------------------------------------------
@@ -367,17 +450,26 @@ class ResetIn(BaseModel):
 
 @router.post("/auth/reset-password", dependencies=[Depends(ratelimit.auth_limit("reset"))])
 def reset_password(body: ResetIn, db: Session = Depends(get_db)):
+    invalid = "this reset link is invalid or has expired; ask for a new one"
     row = db.scalars(select(PasswordResetToken).where(PasswordResetToken.token_hash == _token_hash(body.token))).first()
     if row is None or row.used_at or row.expires_at < utcnow():
-        raise HTTPException(400, "this reset link is invalid or has expired; ask for a new one")
+        raise HTTPException(400, invalid)
     user = db.get(User, row.user_id)
     if user is None or not user.active:
-        raise HTTPException(400, "this reset link is invalid or has expired; ask for a new one")
+        raise HTTPException(400, invalid)
     try:
         passwords.check_policy(body.new_password, user.email)
     except passwords.PasswordPolicyError as exc:
         raise HTTPException(422, str(exc)) from None
-    row.used_at = utcnow()
+    # Claim the link with one conditional update, so two uses at the same time can't both succeed.
+    now = utcnow()
+    claimed = db.execute(update(PasswordResetToken)
+                         .where(PasswordResetToken.id == row.id, PasswordResetToken.used_at.is_(None),
+                                PasswordResetToken.expires_at >= now)
+                         .values(used_at=now).execution_options(synchronize_session=False)).rowcount
+    if claimed != 1:
+        raise HTTPException(400, invalid)
+    db.refresh(row)
     passwords.set_password(db, user, body.new_password, "anonymous", "reset_link")
     return {"status": "password changed; sign in with your new password"}
 
@@ -404,5 +496,7 @@ def oauth_token(
     if tenant is None or not tenant.active:
         raise HTTPException(401, "invalid_client")
     ttl = 60
-    return {"access_token": issue_token(app.id, app.tenant_id, "app", ttl_minutes=ttl), "token_type": "bearer",
-            "expires_in": ttl * 60}
+    # Bound to this client id and secret: turning OAuth off or rotating the secret ends the token (see require_app).
+    binding = {"oauth_client": app.oauth_client_id, "oauth_fp": oauth_fingerprint(app.oauth_client_secret_hash)}
+    return {"access_token": issue_token(app.id, app.tenant_id, "app", ttl_minutes=ttl, extra=binding),
+            "token_type": "bearer", "expires_in": ttl * 60}

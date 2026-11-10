@@ -1,12 +1,14 @@
 // Review-session telemetry client. Records how the document was read inside this page only:
 // sections in view (dwell), scroll depth, focus, flags opened, comments and edits. Batched every 5 seconds.
 
-import { api } from "./api";
+import { api, markActivity } from "./api";
 
 type Event = { type: string; client_ts: string; section_id?: string; span_id?: string; value?: number };
 
 const FLUSH_MS = 5000;
 const ACTIVE_WINDOW_MS = 60000;
+// keepalive requests share a 64 KB body budget, so a flush as the page goes away sends at most this many events.
+const KEEPALIVE_MAX_EVENTS = 300;
 
 export class TelemetryClient {
   private taskId: string;
@@ -42,7 +44,10 @@ export class TelemetryClient {
     );
     document.querySelectorAll<HTMLElement>("[data-section-id]").forEach((el) => this.observer!.observe(el));
 
-    const onActivity = () => (this.lastActivity = Date.now());
+    const onActivity = () => {
+      this.lastActivity = Date.now();
+      markActivity(); // reading counts as using the app: keeps the sliding session alive
+    };
     const onScroll = () => {
       onActivity();
       const el = scrollRoot || document.documentElement;
@@ -51,7 +56,11 @@ export class TelemetryClient {
     };
     const onFocus = () => this.setFocus(true);
     const onBlur = () => this.setFocus(false);
-    const onVis = () => this.setFocus(document.visibilityState === "visible" && document.hasFocus());
+    const onVis = () => {
+      this.setFocus(document.visibilityState === "visible" && document.hasFocus());
+      // The tab may be discarded or closed without another event: send what we have, allowed to outlive the page.
+      if (document.visibilityState === "hidden") this.flush({ keepalive: true });
+    };
     const target: any = scrollRoot || window;
     target.addEventListener("scroll", onScroll, { passive: true });
     window.addEventListener("mousemove", onActivity, { passive: true });
@@ -59,7 +68,7 @@ export class TelemetryClient {
     window.addEventListener("focus", onFocus);
     window.addEventListener("blur", onBlur);
     document.addEventListener("visibilitychange", onVis);
-    const onUnload = () => this.flush(true);
+    const onUnload = () => this.flush({ final: true, keepalive: true });
     window.addEventListener("pagehide", onUnload);
     this.cleanup.push(() => {
       target.removeEventListener("scroll", onScroll);
@@ -102,7 +111,9 @@ export class TelemetryClient {
     this.queue.push({ ...e, client_ts: new Date().toISOString() });
   }
 
-  async flush(final = false) {
+  // final: the client is going away, so failed events are not re-queued. keepalive: the request may outlive the page
+  // (fetch keepalive, with the same Authorization and X-PoR-Channel headers as every other request).
+  async flush({ final = false, keepalive = false }: { final?: boolean; keepalive?: boolean } = {}) {
     this.accumulate();
     if (this.active()) this.push({ type: "heartbeat" });
     for (const [id, secs] of this.dwell) {
@@ -114,9 +125,15 @@ export class TelemetryClient {
       this.sentScroll = this.maxScroll;
     }
     if (!this.queue.length) return;
-    const events = this.queue.splice(0);
+    let events = this.queue.splice(0);
+    if (keepalive && events.length > KEEPALIVE_MAX_EVENTS) {
+      // Keep the oldest for the next regular flush (if there is one); send the newest now.
+      const older = events.slice(0, -KEEPALIVE_MAX_EVENTS);
+      events = events.slice(-KEEPALIVE_MAX_EVENTS);
+      if (!final) this.queue.unshift(...older.slice(-500));
+    }
     try {
-      await api("/v1/telemetry", { body: { task_id: this.taskId, events } });
+      await api("/v1/telemetry", { body: { task_id: this.taskId, events }, keepalive });
     } catch {
       if (!final) this.queue.unshift(...events.slice(-500));
     }
@@ -126,6 +143,6 @@ export class TelemetryClient {
     window.clearInterval(this.timer);
     this.observer?.disconnect();
     this.cleanup.forEach((fn) => fn());
-    await this.flush(true);
+    await this.flush({ final: true, keepalive: true });
   }
 }

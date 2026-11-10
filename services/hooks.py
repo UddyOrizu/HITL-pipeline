@@ -22,7 +22,7 @@ def _run_after_commit(session: Session) -> None:
         try:
             fn()
         except Exception:  # noqa: BLE001
-            log.exception("after-commit callback failed")
+            log.exception("after-commit callback %r failed: its side effect (an event or webhook) may be lost", fn)
 
 
 @event.listens_for(Session, "after_rollback")

@@ -44,7 +44,7 @@ def test_telemetry_summary(client):
     events = [{"type": "focus_lost", "client_ts": (now - timedelta(seconds=3)).isoformat()},
               {"type": "heartbeat", "client_ts": (now - timedelta(seconds=2)).isoformat()},
               {"type": "focus_gained", "client_ts": now.isoformat()}]
-    client.post("/v1/telemetry", json={"task_id": task_id, "events": events}, headers=auth(token))
+    client.post("/v1/telemetry", json={"task_id": task_id, "events": events}, headers={**auth(token), "X-PoR-Channel": "ui"})
     after = client.get(f"/v1/review/tasks/{task_id}", headers=auth(token)).json()["telemetry"]
     assert after["focus_lost_count"] == 1
     assert after["active_seconds"] <= t["active_seconds"] + 1
@@ -107,7 +107,8 @@ def test_comments_and_history(client):
     hist = client.get("/v1/review/history", headers=auth(token)).json()
     assert hist[0]["submission_id"] == sub["id"] and hist[0]["telemetry"]["coverage"] == 1.0
     # Telemetry for a closed task is ignored.
-    r = client.post("/v1/telemetry", json={"task_id": task_id, "events": [{"type": "heartbeat"}]}, headers=auth(token))
+    r = client.post("/v1/telemetry", json={"task_id": task_id, "events": [{"type": "heartbeat"}]},
+                    headers={**auth(token), "X-PoR-Channel": "ui"})
     assert r.json()["stored"] == 0
 
 

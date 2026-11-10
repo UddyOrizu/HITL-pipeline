@@ -1,7 +1,7 @@
 import { Fragment, useMemo, useState } from "react";
-import { api } from "../api";
+import { api, apiAll } from "../api";
 import { useAuth } from "../auth";
-import { Badge, Empty, ErrorBox, num, pct, ROLE_INFO, RoleBadge, Stat, useLoad, when } from "../components/ui";
+import { Badge, Empty, ErrorBox, label, num, pct, ROLE_INFO, RoleBadge, Stat, useLoad, when } from "../components/ui";
 import "./oversight.css";
 
 type Stats = { open_tasks: number; completed_30d: number; minutes_today: number; catch_rate: number | null; canaries_scored: number };
@@ -12,6 +12,38 @@ type User = {
 };
 type Team = { id: string; name: string; daily_ceiling_minutes: number | null; hourly_rate: number | null; members: number; reviewers: number };
 type Moved = { task_id: string; submission_id: string; new_reviewer_id: string | null; status: string };
+// GET /v1/admin/users/{id}: the user plus their open review tasks and the last 25 audit entries about them.
+type OpenTask = { task_id: string; submission_id: string; stage: string | null; kind: string; assigned_at: string; due_at: string | null; effort_minutes: number | null };
+type HistoryEntry = { at: string; action: string; actor: string; payload: Record<string, any> | null };
+type UserDetail = User & { open_tasks: OpenTask[]; history: HistoryEntry[] };
+
+function sameRoles(a: string[], b: string[]) {
+  return a.length === b.length && a.every((r) => b.includes(r));
+}
+
+const ACTION_TEXT: Record<string, string> = {
+  "user.created": "Account created", "user.updated": "Changed", "user.deactivated": "Deactivated", "user.reactivated": "Reactivated",
+  "user.signed_in": "Signed in", "user.sign_in_failed": "Failed sign-in", "user.signed_out": "Signed out",
+  "user.sessions_revoked": "All sessions signed out", "user.profile_updated": "Updated their profile", "user.password_set": "Password set",
+  "user.password_reset_requested": "Password reset requested", "user.erased": "Personal data erased",
+  "user.platform_admin_granted": "Platform admin granted",
+};
+
+function changeValue(v: unknown) {
+  if (Array.isArray(v)) return v.length ? v.join(", ") : "none";
+  if (v === null || v === undefined || v === "") return "none";
+  return String(v);
+}
+
+// One line describing what an audit entry changed, e.g. "roles: reviewer -> admin, reviewer".
+function changeText(e: HistoryEntry, teamName: Record<string, string>) {
+  const changes = e.payload?.changes;
+  if (!changes || typeof changes !== "object") return "";
+  return Object.entries(changes as Record<string, { from: unknown; to: unknown }>).map(([k, c]) => {
+    const fmt = (v: unknown) => changeValue(k === "team_ids" && Array.isArray(v) ? v.map((t) => teamName[t] || t) : v);
+    return `${k === "team_ids" ? "teams" : label(k)}: ${fmt(c?.from)} → ${fmt(c?.to)}`;
+  }).join("; ");
+}
 
 const FILTERS = [
   { key: "all", name: "All" },
@@ -42,15 +74,33 @@ function movedSummary(moved: Moved[]) {
     (waiting ? `, ${waiting} waiting for a free reviewer` : "") + ".";
 }
 
-function UserEditor({ user, teams, selfId, canManage, onClose, onSaved }: {
-  user: User | null; teams: Team[]; selfId: string; canManage: boolean; onClose: () => void; onSaved: (msg: string) => void;
+function UserEditor({ user, teams, people, selfId, canManage, allowAdminReviewers, onClose, onSaved }: {
+  user: User | null; teams: Team[]; people: User[]; selfId: string; canManage: boolean;
+  // null: unknown (organisation settings not loaded); then only an existing admin + reviewer combination is offered.
+  allowAdminReviewers: boolean | null;
+  onClose: () => void; onSaved: (msg: string) => void;
 }) {
   const isNew = !user;
+  // Open tasks (handed over on deactivation) and recent changes for an existing user.
+  const detail = useLoad(() => (user ? api<UserDetail>(`/v1/admin/users/${user.id}`) : Promise.resolve(null)), [user?.id]);
+  const openList = detail.data?.open_tasks || [];
+  const teamNames = Object.fromEntries(teams.map((t) => [t.id, t.name]));
+  const personName = (actor: string) => {
+    const [kind, id] = actor.split(":");
+    if (kind !== "user" && kind !== "platform") return actor === "anonymous" ? "an unauthenticated request" : label(actor);
+    if (id === selfId) return "you";
+    const p = people.find((u) => u.id === id);
+    return p ? (p.name || p.email) : kind === "platform" ? "a platform admin" : "another user";
+  };
   const [email, setEmail] = useState(user?.email || "");
   const [name, setName] = useState(user?.name || "");
   const primary0 = user?.roles.includes("admin") ? "admin" : user?.roles.includes("reviewer") || isNew ? "reviewer" : "none";
   const [primary, setPrimary] = useState<"admin" | "reviewer" | "none">(primary0);
   const [extra, setExtra] = useState<string[]>(user?.roles.filter((r) => EXTRA_ROLES.includes(r)) || []);
+  // An admin who also reviews (only when the organisation allows it, or they already have both roles).
+  const hadBoth = !!user?.roles.includes("admin") && !!user?.roles.includes("reviewer");
+  const [adminReviews, setAdminReviews] = useState(hadBoth);
+  const canAdminReview = allowAdminReviewers === true || hadBoth;
   const [teamIds, setTeamIds] = useState<string[]>(user?.team_ids || (teams.length === 1 ? [teams[0].id] : []));
   const [err, setErr] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
@@ -106,9 +156,16 @@ function UserEditor({ user, teams, selfId, canManage, onClose, onSaved }: {
     }
   }
 
-  const roles = [...(primary === "none" ? [] : [primary]), ...(primary === "admin" ? [] : extra)];
-  const lostReviewer = !!user?.roles.includes("reviewer") && primary !== "reviewer";
-  const openTasks = user?.stats?.open_tasks || 0;
+  // Extra access is kept for admins too (admin already implies it, but it matters again if admin is removed later),
+  // so saving never drops a role the user had unless it was deliberately changed here.
+  const roles = [
+    ...(primary === "none" ? [] : [primary]),
+    ...(primary === "admin" && adminReviews ? ["reviewer"] : []),
+    ...extra,
+  ];
+  const rolesChanged = !user || !sameRoles(roles, user.roles);
+  const lostReviewer = !!user?.roles.includes("reviewer") && !roles.includes("reviewer");
+  const openTasks = detail.data ? openList.length : user?.stats?.open_tasks || 0;
   const toggle = (list: string[], v: string) => (list.includes(v) ? list.filter((x) => x !== v) : [...list, v]);
 
   async function save(active?: boolean) {
@@ -120,7 +177,10 @@ function UserEditor({ user, teams, selfId, canManage, onClose, onSaved }: {
         const how = password ? "with this email and the password you set" : "with single sign-on";
         onSaved(`Added ${email}. They can sign in ${how}${primary === "reviewer" ? " and will start receiving review work" : ""}.`);
       } else {
-        const body: any = active === undefined ? { name, roles, team_ids: teamIds, hourly_rate: rateOrNull(rate) } : { active };
+        // Roles are only sent when they changed, so editing a name never touches them.
+        const body: any = active === undefined
+          ? { name, ...(rolesChanged ? { roles } : {}), team_ids: teamIds, hourly_rate: rateOrNull(rate) }
+          : { active };
         const r = await api<User & { reassigned: Moved[] }>(`/v1/admin/users/${user!.id}`, { method: "PUT", body });
         const verb = active === false ? "Deactivated" : active === true ? "Reactivated" : "Saved";
         onSaved(`${verb} ${r.email}. ${movedSummary(r.reassigned)}`.trim());
@@ -188,10 +248,23 @@ function UserEditor({ user, teams, selfId, canManage, onClose, onSaved }: {
             </>
           )}
           {primary === "admin" && (
-            <p className="sub" style={{ fontSize: 13 }}>
-              Admins already have oversight, audit, integration and submit access. They are never assigned review work: an admin sets the
-              canary rates, caps and thresholds, so they shouldn't also be measured by them.
-            </p>
+            <>
+              <p className="sub" style={{ fontSize: 13 }}>
+                Admins already have oversight, audit, integration and submit access.{" "}
+                {canAdminReview
+                  ? "An admin sets the canary rates, caps and thresholds, so by default they aren't given review work. Your organisation allows an admin to review as well, for when there is nobody else."
+                  : "They are never assigned review work: an admin sets the canary rates, caps and thresholds, so they shouldn't also be measured by them. To allow it, turn on \"Allow people to have both the admin and reviewer roles\" in Organisation settings."}
+              </p>
+              {canAdminReview && (
+                <label className="check">
+                  <input type="checkbox" checked={adminReviews} onChange={(e) => setAdminReviews(e.target.checked)} />
+                  <span><strong>Also a reviewer</strong> <span className="sub">Gets review work, measured by canaries, telemetry and spot-checks like any other reviewer.</span></span>
+                </label>
+              )}
+              {hadBoth && adminReviews && allowAdminReviewers === false && (
+                <div className="notice">Your organisation no longer allows admins to review. Other changes save without touching this, but untick it to separate the roles.</div>
+              )}
+            </>
           )}
 
           <label>Teams</label>
@@ -280,9 +353,55 @@ function UserEditor({ user, teams, selfId, canManage, onClose, onSaved }: {
             {lostReviewer && openTasks > 0 && (
               <div className="notice">They have {openTasks} open review task{openTasks === 1 ? "" : "s"}. Saving hands these to other reviewers.</div>
             )}
+            {confirmOff && (
+              <div className="notice">
+                {openTasks
+                  ? `Deactivating hands their ${openTasks} open review task${openTasks === 1 ? "" : "s"} (listed below) to other reviewers and signs them out.`
+                  : "They have no open review tasks. Deactivating signs them out and stops them signing in."}
+              </div>
+            )}
             {!roles.length && <div className="notice">Pick an account type or at least one kind of access.</div>}
           </>
         )}
+        {user && (
+          <>
+            <label>Open review tasks{detail.data ? ` (${openList.length})` : ""}</label>
+            {detail.loading && !detail.data ? <p className="sub" style={{ fontSize: 13 }}>Loading…</p>
+              : detail.error ? <ErrorBox error={detail.error} />
+              : !openList.length ? <p className="sub" style={{ fontSize: 13, margin: "4px 0" }}>None: nothing to hand over.</p> : (
+                <div style={{ maxHeight: 180, overflow: "auto", border: "1px solid var(--border)", borderRadius: 6 }}>
+                  <table>
+                    <thead><tr><th>Submission</th><th>Stage</th><th>Assigned</th><th>Due</th><th>Effort</th></tr></thead>
+                    <tbody>
+                      {openList.map((t) => (
+                        <tr key={t.task_id}>
+                          <td className="mono" style={{ fontSize: 12 }}>{t.submission_id.slice(0, 8)}{t.kind !== "primary" && <> <Badge>{label(t.kind)}</Badge></>}</td>
+                          <td>{t.stage || "–"}</td>
+                          <td className="sub">{when(t.assigned_at)}</td>
+                          <td className="sub">{when(t.due_at)}</td>
+                          <td className="sub">{t.effort_minutes != null ? `${num(t.effort_minutes)} min` : "–"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            {!!detail.data?.history.length && (
+              <details style={{ marginTop: 10 }}>
+                <summary style={{ cursor: "pointer", fontWeight: 600, fontSize: 13 }}>Recent changes ({detail.data.history.length})</summary>
+                <ul style={{ margin: "6px 0 0", paddingLeft: 18, fontSize: 13 }}>
+                  {detail.data.history.map((h, i) => (
+                    <li key={i} style={{ marginBottom: 4 }}>
+                      <span className="sub">{when(h.at)}</span> · {ACTION_TEXT[h.action] || label(h.action.replace(/^user\./, ""))} by {personName(h.actor)}
+                      {changeText(h, teamNames) && <div className="sub" style={{ fontSize: 12 }}>{changeText(h, teamNames)}</div>}
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
+          </>
+        )}
+
         <ErrorBox error={err} />
 
         {readOnly ? (
@@ -403,8 +522,10 @@ export default function Users() {
   const { me } = useAuth();
   // The page is also open to oversight leads, read-only: every change is admin-only on the server.
   const canManage = !!me?.roles.includes("admin");
-  const users = useLoad(() => api<User[]>("/v1/admin/users"));
-  const teams = useLoad(() => api<Team[]>("/v1/admin/teams"));
+  const users = useLoad(() => apiAll<User>("/v1/admin/users"));
+  const teams = useLoad(() => apiAll<Team>("/v1/admin/teams"));
+  // Whether an admin may also hold the reviewer role (organisation settings: admin-only, as is editing users).
+  const tenant = useLoad(() => (canManage ? api<{ allow_admin_reviewers: boolean }>("/v1/admin/tenant") : Promise.resolve(null)), [canManage]);
   const [filter, setFilter] = useState<FilterKey>("all");
   const [q, setQ] = useState("");
   const [editing, setEditing] = useState<User | "new" | null>(null);
@@ -415,14 +536,14 @@ export default function Users() {
   const active = all.filter((u) => u.active);
   const counts = {
     admin: active.filter((u) => u.kind === "admin").length,
-    reviewer: active.filter((u) => u.kind === "reviewer").length,
+    reviewer: active.filter((u) => u.roles.includes("reviewer")).length,
     staff: active.filter((u) => u.kind === "staff" || u.kind === "none").length,
     inactive: all.length - active.length,
   };
   const rows = all.filter((u) => {
     if (filter === "inactive" ? u.active : !u.active) return false;
     if (filter === "admin" && u.kind !== "admin") return false;
-    if (filter === "reviewer" && u.kind !== "reviewer") return false;
+    if (filter === "reviewer" && !u.roles.includes("reviewer")) return false;
     if (filter === "staff" && !(u.kind === "staff" || u.kind === "none")) return false;
     return !q || `${u.name} ${u.email}`.toLowerCase().includes(q.toLowerCase());
   });
@@ -453,7 +574,8 @@ export default function Users() {
       <ErrorBox error={users.error || teams.error} />
 
       <div className="grid grid-4" style={{ marginBottom: 16 }}>
-        <Stat label="Admins" value={counts.admin} hint="Run the platform. Never assigned reviews." />
+        <Stat label="Admins" value={counts.admin}
+          hint={tenant.data?.allow_admin_reviewers ? "Run the platform. Review only if also given the reviewer role." : "Run the platform. Never assigned reviews."} />
         <Stat label="Reviewers" value={counts.reviewer} hint={`${active.reduce((n, u) => n + (u.stats?.open_tasks || 0), 0)} open tasks between them`} />
         <Stat label="Other staff" value={counts.staff} hint="Submitters, oversight, audit, integrations" />
         <Stat label="Deactivated" value={counts.inactive} hint="Kept for the audit trail" />
@@ -515,7 +637,8 @@ export default function Users() {
 
       {editing && (
         <UserEditor key={editing === "new" ? "new" : editing.id} user={editing === "new" ? null : editing} teams={teams.data || []}
-          selfId={me?.id || ""} canManage={canManage}
+          people={all} selfId={me?.id || ""} canManage={canManage}
+          allowAdminReviewers={tenant.data ? tenant.data.allow_admin_reviewers : null}
           onClose={() => { setEditing(null); users.reload(); }} onSaved={saved} />
       )}
     </>

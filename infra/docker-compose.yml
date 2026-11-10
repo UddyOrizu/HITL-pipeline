@@ -1,20 +1,26 @@
 # Local stack: Postgres + TimescaleDB, Redis, MinIO, LibreOffice worker, ClamAV, Mailpit (catches email),
-# API (serves the web app) and worker.
+# a one-shot migration step, the API (serves the web app) and the worker.
 # Usage (from the repo root):  docker compose -f infra/docker-compose.yml up --build
-# Hosted MCP server too:       POR_MCP_API_KEY=por_... docker compose -f infra/docker-compose.yml --profile mcp up
+# Hosted MCP server too:       POR_MCP_API_KEY=por_... POR_MCP_HTTP_TOKEN=<long random string> \
+#                              docker compose -f infra/docker-compose.yml --profile mcp up
 name: proof-of-review
 
 x-app-env: &app-env
   POR_ENV: dev
-  POR_DATABASE_URL: postgresql+psycopg://por:por@postgres:5432/por
+  # The apps connect as por_app, which is not a superuser, so Postgres row-level security applies to them.
+  # The migrate service runs as the owner (por) and creates por_app (scripts/db_app_role.py).
+  POR_DATABASE_URL: postgresql+psycopg://por_app:por_app@postgres:5432/por
   POR_SECRET_KEY: ${POR_SECRET_KEY:-dev-only-insecure-secret-change-me-in-production}
   POR_PUBLIC_BASE_URL: http://localhost:8000
+  # Connectors and the worker call the API on the compose network, not through the public URL.
+  POR_INTERNAL_API_URL: http://api:8000
   POR_INLINE_JOBS: "false"
   POR_REDIS_URL: redis://redis:6379/0
   POR_S3_ENDPOINT: http://minio:9000
   POR_S3_BUCKET: por-files
   POR_S3_ACCESS_KEY: por
   POR_S3_SECRET_KEY: por-minio-secret
+  POR_S3_SERVER_SIDE_ENCRYPTION: "" # MinIO without a KMS rejects the SSE header
   POR_LIBREOFFICE_URL: http://libreoffice:8100
   POR_CLAMAV_HOST: clamav
   POR_SMTP_HOST: mailpit
@@ -26,6 +32,10 @@ x-app-env: &app-env
   POR_MODEL_PROVIDER: ${POR_MODEL_PROVIDER:-heuristic}
   POR_MODEL_ID: ${POR_MODEL_ID:-claude-sonnet-5-5}
   POR_MODEL_API_KEY: ${POR_MODEL_API_KEY:-}
+
+x-app-build: &app-build
+  context: ..
+  dockerfile: Dockerfile
 
 services:
   postgres:
@@ -43,7 +53,13 @@ services:
 
   redis:
     image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"] # keep queued jobs and events across restarts
     ports: ["6379:6379"]
+    volumes: [redis:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 20
 
   minio:
     image: minio/minio:RELEASE.2024-11-07T00-52-20Z
@@ -57,6 +73,7 @@ services:
   libreoffice:
     build: ./libreoffice
     ports: ["8100:8100"]
+    restart: unless-stopped
 
   clamav:
     image: clamav/clamav:stable
@@ -65,46 +82,83 @@ services:
       test: ["CMD", "clamdcheck.sh"]
       interval: 30s
       retries: 20
-      start_period: 120s  # the first virus database download takes a while
+      start_period: 120s # the first virus database download takes a while
 
   mailpit:
     image: axllent/mailpit:v1.21
-    ports: ["8025:8025", "1025:1025"]  # web inbox on http://localhost:8025
+    ports: ["8025:8025", "1025:1025"] # web inbox on http://localhost:8025
 
-  api:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-    environment: *app-env
-    ports: ["8000:8000"]
+  # Runs the database migrations once, as the owner, then creates the apps' non-superuser role.
+  # The API and the worker start only after it succeeded.
+  migrate:
+    build: *app-build
+    command: ["sh", "-c", "alembic upgrade head && python -m scripts.db_app_role"]
+    environment:
+      <<: *app-env
+      POR_DATABASE_URL: postgresql+psycopg://por:por@postgres:5432/por
+      POR_APP_DB_USER: por_app
+      POR_APP_DB_PASSWORD: por_app
     depends_on:
       postgres: {condition: service_healthy}
-      redis: {condition: service_started}
+    restart: "no"
+
+  api:
+    build: *app-build
+    command: ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment: *app-env
+    ports: ["8000:8000"]
+    volumes: [appdata:/app/var] # demo.json and local files survive container recreation
+    restart: unless-stopped
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
       minio: {condition: service_started}
       clamav: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/readyz', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
 
   worker:
-    build:
-      context: ..
-      dockerfile: Dockerfile
+    build: *app-build
     command: ["python", "-m", "services.worker"]
-    environment: *app-env
-    depends_on: [api]
+    environment:
+      <<: *app-env
+      POR_WORKER_METRICS_PORT: "9100"
+    ports: ["9100:9100"] # Prometheus metrics, including job stream and dead-letter lengths
+    volumes: [appdata:/app/var]
+    restart: unless-stopped
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      api: {condition: service_healthy} # connectors call the API
+    healthcheck:
+      test: ["CMD", "python", "-m", "services.worker", "health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   mcp:
     profiles: [mcp]
-    build:
-      context: ..
-      dockerfile: Dockerfile
+    build: *app-build
     command: ["python", "-m", "mcp_server.server", "--http"]
     environment:
       POR_MCP_API_URL: http://api:8000
       POR_MCP_API_KEY: ${POR_MCP_API_KEY:?set POR_MCP_API_KEY to a source app key}
+      # Clients send "Authorization: Bearer <POR_MCP_HTTP_TOKEN>" to http://localhost:8001/mcp.
+      POR_MCP_HTTP_TOKEN: ${POR_MCP_HTTP_TOKEN:?set POR_MCP_HTTP_TOKEN to a long random string}
       POR_MCP_PORT: "8000"
       POR_MCP_HOST: 0.0.0.0
     ports: ["8001:8000"]
-    depends_on: [api]
+    restart: unless-stopped
+    depends_on:
+      api: {condition: service_healthy}
 
 volumes:
   pgdata:
+  redis:
   minio:
+  appdata:

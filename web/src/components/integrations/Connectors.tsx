@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { api } from "../../api";
+import { api, apiAll } from "../../api";
 import { Badge, Empty, Modal, useLoad, when } from "../ui";
 import { Confirm, Err, useAction } from "../admin/common";
 import { fieldsFor, KIND_INFO, kindTitle, ORIGINS, RISK_TIERS, TEAMS_EVENTS, type FieldDef } from "./connectorFields";
@@ -8,9 +8,9 @@ import { fullTime, MASK, type Connector, type KindSpec, type Loaded, type Source
 type RunResult = { connector: Connector; result: Record<string, any> };
 
 export function Connectors({ apps }: { apps: Loaded<SourceApp[]> }) {
-  const connectors = useLoad(() => api<Connector[]>("/v1/integrations/connectors"));
+  const connectors = useLoad(() => apiAll<Connector>("/v1/integrations/connectors"));
   const kinds = useLoad(() => api<Record<string, KindSpec>>("/v1/integrations/connector-kinds"));
-  const workflows = useLoad(() => api<Workflow[]>("/v1/integrations/workflows"));
+  const workflows = useLoad(() => apiAll<Workflow>("/v1/integrations/workflows"));
   const [editing, setEditing] = useState<Connector | "new" | null>(null);
   const [deleting, setDeleting] = useState<Connector | null>(null);
   const [ran, setRan] = useState<RunResult | null>(null);

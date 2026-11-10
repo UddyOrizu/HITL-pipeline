@@ -186,6 +186,11 @@ def _count(values) -> list[dict]:
     return [{"key": k, "count": n} for k, n in sorted(acc.items(), key=lambda x: -x[1])]
 
 
+def _empty_reviewer() -> dict:
+    return {"tasks": 0, "primary": 0, "spot_checks": 0, "approvals": 0, "warnings_confirmed": 0, "warnings_flagged": 0,
+            "_active": [], "_ratio": [], "_coverage": [], "_flags": [], "sla_breaches": 0, "channels": defaultdict(int)}
+
+
 def reviewers(db: Session, tenant_id: str, start: datetime, end: datetime) -> list[dict]:
     users = {u.id: u for u in db.scalars(select(User).where(User.tenant_id == tenant_id)).all()}
     rows = db.execute(
@@ -195,15 +200,16 @@ def reviewers(db: Session, tenant_id: str, start: datetime, end: datetime) -> li
     acc: dict[str, dict] = {}
     disagreed: dict[str, int] = defaultdict(int)  # spot-checks that disagreed with this reviewer's decision
     for t, d in rows:
-        r = acc.setdefault(t.reviewer_id, {"tasks": 0, "primary": 0, "spot_checks": 0, "approvals": 0, "warnings": 0,
-                                            "_active": [], "_ratio": [], "_coverage": [], "_flags": [], "sla_breaches": 0,
-                                            "channels": defaultdict(int), "disagreements": 0})
+        r = acc.setdefault(t.reviewer_id, _empty_reviewer())
         r["tasks"] += 1
         r["primary" if t.kind == "primary" else "spot_checks"] += 1
         r["approvals"] += d.outcome == "approve"
-        r["warnings"] += bool(d.warnings)
-        r["channels"][d.channel] += 1
         tel = d.telemetry_summary or {}
+        if d.warnings:
+            # "flagged": let through by the telemetry policy's flag action; otherwise the reviewer confirmed the
+            # warning (decisions made before the distinction count as confirmed).
+            r["warnings_flagged" if tel.get("review_standard") == "flagged" else "warnings_confirmed"] += 1
+        r["channels"][d.channel] += 1
         if d.channel == "ui":
             r["_active"].append((tel.get("active_seconds") or 0) / 60)
             r["_ratio"].append(tel.get("reading_ratio") or 0)
@@ -237,9 +243,7 @@ def reviewers(db: Session, tenant_id: str, start: datetime, end: datetime) -> li
 
     out = []
     for uid in set(acc) | {u.id for u in users.values() if "reviewer" in (u.roles or []) and u.active}:
-        r = acc.get(uid) or {"tasks": 0, "primary": 0, "spot_checks": 0, "approvals": 0, "warnings": 0, "_active": [],
-                             "_ratio": [], "_coverage": [], "_flags": [], "sla_breaches": 0, "channels": {},
-                             "disagreements": 0}
+        r = acc.get(uid) or _empty_reviewer()
         u = users.get(uid)
         c = caught.get(uid, [])
         out.append({
@@ -251,7 +255,7 @@ def reviewers(db: Session, tenant_id: str, start: datetime, end: datetime) -> li
             "median_reading_ratio": _median(r["_ratio"]),
             "mean_coverage": round(sum(r["_coverage"]) / len(r["_coverage"]), 3) if r["_coverage"] else None,
             "flag_engagement": round(sum(r["_flags"]) / len(r["_flags"]), 3) if r["_flags"] else None,
-            "warnings_confirmed": r["warnings"],
+            "warnings_confirmed": r["warnings_confirmed"], "warnings_flagged": r["warnings_flagged"],
             "canaries_scored": len(c), "catch_rate": _rate(sum(c), len(c)),
             "spot_check_disagreements": disagreed.get(uid, 0),
             "sla_breaches": r["sla_breaches"],
@@ -278,6 +282,26 @@ def sla(db: Session, tenant_id: str) -> dict:
 
 
 REVIEWER_COLUMNS = ["name", "email", "tasks", "primary", "spot_checks", "approval_rate", "median_active_minutes",
-                    "median_reading_ratio", "mean_coverage", "flag_engagement", "warnings_confirmed", "canaries_scored",
+                    "median_reading_ratio", "mean_coverage", "flag_engagement", "warnings_confirmed", "warnings_flagged",
+                    "canaries_scored",
                     "catch_rate", "spot_check_disagreements", "sla_breaches", "open_tasks", "overdue_tasks"]
 SERIES_COLUMNS = ["period", "received", "decided", "approved", "rejected", "changes_requested", "median_turnaround_hours"]
+SLA_COLUMNS = ["task_id", "submission_id", "title", "stage", "kind", "reviewer", "due_at", "hours_overdue", "escalated"]
+OVERVIEW_COLUMNS = ["section", "key", "label", "period", "received", "decided", "approved", "rejected",
+                    "changes_requested", "approval_rate", "median_turnaround_hours", "median_score", "decisions",
+                    "count", "value"]
+BREAKDOWNS = ("by_workflow", "by_source_app", "by_risk_tier", "by_origin")
+
+
+def overview_csv_rows(data: dict) -> list[dict]:
+    """The whole overview as one long-format table: a "section" column says which part each row belongs to
+    (kpi, series, by_workflow, by_source_app, by_risk_tier, by_origin, by_channel, held_by_reason)."""
+    rows: list[dict] = [{"section": "kpi", "key": k, "label": k, "value": v} for k, v in data["kpis"].items()]
+    rows += [{"section": "series", **r} for r in data["series"]]
+    for name in BREAKDOWNS:
+        rows += [{"section": name, **r} for r in data[name]]
+    rows += [{"section": "by_channel", "key": r["channel"], "label": r["channel"], "decisions": r["decisions"]}
+             for r in data["by_channel"]]
+    rows += [{"section": "held_by_reason", "key": r["key"], "label": r["key"], "count": r["count"]}
+             for r in data["held_by_reason"]]
+    return rows

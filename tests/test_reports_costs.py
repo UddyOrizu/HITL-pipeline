@@ -151,7 +151,9 @@ def test_overview_report(client, sink):
     assert client.get("/v1/reports/overview", headers=auth(world["users"]["r1"]["token"])).status_code == 403
     assert client.get("/v1/reports/overview?from=2026-02-01&to=2026-01-01", headers=lead).status_code == 422
     csv_text = client.get("/v1/reports/overview?format=csv", headers=lead).text
-    assert csv_text.startswith("period,received,decided")
+    assert csv_text.startswith("section,key,label,period,received,decided")
+    sections = {line.split(",", 1)[0] for line in csv_text.strip().splitlines()[1:]}
+    assert {"kpi", "series", "by_workflow", "by_source_app", "by_risk_tier", "by_origin", "by_channel"} <= sections
 
 
 def test_reviewer_report_and_sla(client, sink):

@@ -10,13 +10,14 @@ from __future__ import annotations
 import re
 from datetime import timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import String, cast, delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from api.deps import ROLES, UserPrincipal, get_db, require_roles
-from db.models import AuditEvent, ReviewTask, Team, Tenant, User, utcnow
+from api.pagination import Page, set_headers
+from db.models import AuditEvent, PasswordResetToken, ReviewTask, Submission, Team, Tenant, User, utcnow
 from services import assignment, audit, canary, passwords, workflow
 
 router = APIRouter(prefix="/v1/admin", tags=["users"])
@@ -84,6 +85,29 @@ def _get_user(db: Session, p: UserPrincipal, user_id: str) -> User:
     return u
 
 
+def _guard_platform_admin(p: UserPrincipal, u: User) -> None:
+    """A platform administrator's account (which can manage every organisation) can only be changed by another
+    platform administrator, so a tenant admin can't take it over through a password, roles, sign-out or erasure."""
+    if u.is_platform_admin and not p.user.is_platform_admin:
+        raise HTTPException(403, "this account is a platform administrator; only a platform administrator can "
+                                 "change its password, roles, status or sessions, or erase it")
+
+
+class ListPage:
+    """Optional paging for the people and team lists. Without limit the whole list comes back (what the web app
+    expects); X-Total-Count is always set, and X-Next-Offset when there is a further page."""
+
+    def __init__(self, offset: int = Query(0, ge=0), limit: int | None = Query(None, ge=1, le=500)):
+        self.offset, self.limit = offset, limit
+
+
+def _page(items: list, page: ListPage, response: Response) -> list:
+    limit = page.limit or max(len(items) - page.offset, 0) or 1
+    chunk = items[page.offset: page.offset + limit]
+    set_headers(response, len(items), Page(page.offset, limit), len(chunk))
+    return chunk
+
+
 def _active_admins(db: Session, tenant_id: str) -> list[User]:
     users = db.scalars(select(User).where(User.tenant_id == tenant_id, User.active.is_(True))).all()
     return [u for u in users if "admin" in (u.roles or [])]
@@ -119,14 +143,16 @@ def _check_teams(db: Session, tenant_id: str, team_ids: list[str]) -> list[str]:
 
 @router.get("/users")
 def list_users(
+    response: Response,
     role: str | None = Query(None, description="admin | reviewer | oversight_lead | auditor | integration_owner"),
     status: str = Query("all", pattern="^(active|inactive|all)$"),
     q: str | None = None,
+    page: ListPage = Depends(),
     p: UserPrincipal = Depends(reader),
     db: Session = Depends(get_db),
 ):
     users = db.scalars(select(User).where(User.tenant_id == p.tenant_id).order_by(User.email)).all()
-    out = []
+    matching = []
     for u in users:
         if role and role not in (u.roles or []):
             continue
@@ -134,8 +160,8 @@ def list_users(
             continue
         if q and q.lower() not in f"{u.email} {u.name}".lower():
             continue
-        out.append(user_out(u, db))
-    return out
+        matching.append(u)
+    return [user_out(u, db) for u in _page(matching, page, response)]
 
 
 class UserIn(BaseModel):
@@ -189,6 +215,7 @@ def set_user_password(user_id: str, body: PasswordIn, p: UserPrincipal = Depends
     u = _get_user(db, p, user_id)
     if u.id == p.user.id:
         raise HTTPException(409, "change your own password from your account (it needs your current password)")
+    _guard_platform_admin(p, u)
     _check_password(body.password, u.email)
     passwords.set_password(db, u, body.password, _actor(p), "admin")
     return user_out(u, db)
@@ -228,6 +255,8 @@ def update_user(user_id: str, body: UserUpdate, p: UserPrincipal = Depends(admin
     roles = _check_roles(db, p.tenant_id, body.roles) if body.roles is not None else list(u.roles or [])
     team_ids = _check_teams(db, p.tenant_id, body.team_ids) if body.team_ids is not None else list(u.team_ids or [])
     active = u.active if body.active is None else body.active
+    if set(roles) != set(u.roles or []) or active != u.active:
+        _guard_platform_admin(p, u)
 
     losing_admin = "admin" in (u.roles or []) and u.active and ("admin" not in roles or not active)
     if u.id == p.user.id and losing_admin:
@@ -271,6 +300,7 @@ def update_user(user_id: str, body: UserUpdate, p: UserPrincipal = Depends(admin
 def sign_out_user(user_id: str, p: UserPrincipal = Depends(admin), db: Session = Depends(get_db)):
     """End every session the user has (e.g. a lost laptop). They can sign in again straight away."""
     u = _get_user(db, p, user_id)
+    _guard_platform_admin(p, u)
     u.sessions_revoked_at = utcnow()
     audit.record(db, p.tenant_id, _actor(p), "user.sessions_revoked", "user", u.id, {"by": "admin"})
     return user_out(u, db)
@@ -278,26 +308,62 @@ def sign_out_user(user_id: str, p: UserPrincipal = Depends(admin), db: Session =
 
 @router.post("/users/{user_id}/erase")
 def erase_user(user_id: str, p: UserPrincipal = Depends(admin), db: Session = Depends(get_db)):
-    """Remove a deactivated user's personal data (name, email, sign-in details) for an erasure request. Their
-    decisions stay, attributed to the anonymised account. Earlier audit entries are append-only and keep what they
-    recorded at the time."""
+    """Remove a deactivated user's personal data (name, email, sign-in details, password reset links, and their
+    email or name in submission metadata, such as author_email on what they sent through the portal) for an erasure
+    request. Their decisions stay, attributed to the anonymised account, and submitted_by keeps the account id.
+    Earlier audit entries are append-only and keep what they recorded at the time."""
     u = _get_user(db, p, user_id)
     if u.id == p.user.id:
         raise HTTPException(409, "you cannot erase your own account")
+    _guard_platform_admin(p, u)
     if u.active:
         raise HTTPException(409, "deactivate the user first")
     if u.erased_at:
         return user_out(u, db)
+    old_email, old_name = (u.email or "").lower(), (u.name or "").strip()
     u.name = "Erased user"
     u.email = f"erased-{u.id}@erased.invalid"
+    scrubbed = _scrub_submissions(db, p.tenant_id, u, old_email, old_name)
+    db.execute(delete(PasswordResetToken).where(PasswordResetToken.user_id == u.id)
+               .execution_options(synchronize_session=False))
     u.password_hash = None
     u.oidc_subject = None
     u.hourly_rate = None
     u.email_notifications = False
     u.sessions_revoked_at = utcnow()
     u.erased_at = utcnow()
-    audit.record(db, p.tenant_id, _actor(p), "user.erased", "user", u.id, {})
+    audit.record(db, p.tenant_id, _actor(p), "user.erased", "user", u.id, {"submissions_scrubbed": scrubbed})
     return user_out(u, db)
+
+
+# Metadata keys that may hold a person's name (emails are found in any key).
+NAME_KEYS = {"author", "author_name", "submitted_by_name", "submitter_name", "owner_name", "requested_by"}
+
+
+def _scrub_submissions(db: Session, tenant_id: str, u: User, old_email: str, old_name: str) -> int:
+    """Replace the user's email (in any top-level metadata value) and name (in name-like keys) on the tenant's
+    submissions. The email becomes the erased account's placeholder address, so the conflict rule (author_email
+    against the reviewer's email) still keeps them off their own work."""
+    if not old_email:
+        return 0
+    text = cast(Submission.meta, String)
+    rows = db.scalars(select(Submission).where(Submission.tenant_id == tenant_id, or_(
+        Submission.meta["submitted_by"].as_string() == u.id, func.lower(text).contains(old_email, autoescape=True)))).all()
+    count = 0
+    for sub in rows:
+        meta = dict(sub.meta or {})
+        changed = False
+        for key, value in list(meta.items()):
+            if not isinstance(value, str):
+                continue
+            if value.strip().lower() == old_email:
+                meta[key], changed = u.email, True
+            elif old_name and key in NAME_KEYS and value.strip() == old_name and meta.get("submitted_by") in (None, u.id):
+                meta[key], changed = "Erased user", True
+        if changed:
+            sub.meta = meta
+            count += 1
+    return count
 
 
 # --- Teams ------------------------------------------------------------------------------
@@ -317,8 +383,10 @@ def team_out(db: Session, t: Team) -> dict:
 
 
 @router.get("/teams")
-def list_teams(p: UserPrincipal = Depends(reader), db: Session = Depends(get_db)):
-    return [team_out(db, t) for t in db.scalars(select(Team).where(Team.tenant_id == p.tenant_id).order_by(Team.name)).all()]
+def list_teams(response: Response, page: ListPage = Depends(), p: UserPrincipal = Depends(reader),
+               db: Session = Depends(get_db)):
+    teams = db.scalars(select(Team).where(Team.tenant_id == p.tenant_id).order_by(Team.name)).all()
+    return [team_out(db, t) for t in _page(list(teams), page, response)]
 
 
 @router.post("/teams", status_code=201)

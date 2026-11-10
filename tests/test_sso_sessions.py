@@ -123,7 +123,8 @@ def test_sso_email_in_two_tenants_chooses_an_organisation(client, idp):
     with session_scope() as db:
         db.add(User(tenant_id=b["tenant_id"], email="shared@alpha.test", name="S", roles=["reviewer"], team_ids=[]))
         db.add(User(tenant_id=a["tenant_id"], email="shared@alpha.test", name="S", roles=["reviewer"], team_ids=[]))
-    r = sso_sign_in(client, claims={"email": "shared@alpha.test"}, idp=idp)
+    # The platform provider must confirm the email (email_verified) before it can link existing accounts.
+    r = sso_sign_in(client, claims={"email": "shared@alpha.test", "email_verified": True}, idp=idp)
     assert r.status_code == 409
     detail = r.json()["detail"]
     assert {t["name"] for t in detail["tenants"]} == {"Alpha", "Bravo"}

@@ -20,10 +20,14 @@ def reset() -> None:
 
 
 def client_ip(request: Request) -> str:
+    """The client address. Behind a trusted proxy (POR_TRUST_FORWARDED_FOR) it is the rightmost X-Forwarded-For
+    entry: the address the proxy itself saw and appended. Entries to its left come from the client and can be forged."""
     if get_settings().trust_forwarded_for:
         fwd = request.headers.get("x-forwarded-for")
         if fwd:
-            return fwd.split(",")[0].strip()
+            hops = [h.strip() for h in fwd.split(",") if h.strip()]
+            if hops:
+                return hops[-1]
     return request.client.host if request.client else "unknown"
 
 

@@ -70,10 +70,10 @@ def create_source_app(db: Session, tenant_id: str, name: str, webhook_url: str |
 
 
 @router.get("/apps")
-def list_apps(p: UserPrincipal = Depends(owner), db: Session = Depends(get_db)):
+def list_apps(response: Response, page: Page = Depends(), p: UserPrincipal = Depends(owner), db: Session = Depends(get_db)):
     # The built-in web portal app is managed by the platform, so it is not listed or editable here.
-    return [app_out(a) for a in db.scalars(select(SourceApp).where(SourceApp.tenant_id == p.tenant_id, SourceApp.kind == "api")
-                                           .order_by(SourceApp.name)).all()]
+    q = select(SourceApp).where(SourceApp.tenant_id == p.tenant_id, SourceApp.kind == "api").order_by(SourceApp.name, SourceApp.id)
+    return [app_out(a) for a in paginate(db, q, page, response)]
 
 
 @router.post("/apps", status_code=201)
@@ -90,18 +90,26 @@ def _app(db: Session, p: UserPrincipal, app_id: str) -> SourceApp:
 
 class AppPatch(BaseModel):
     name: str | None = Field(None, min_length=1, max_length=200)
-    webhook_url: str | None = None
+    webhook_url: str | None = None  # null or "" removes the webhook
     active: bool | None = None
+
+
+NOT_NULLABLE = ("name", "active")
 
 
 @router.patch("/apps/{app_id}")
 def update_app(app_id: str, body: AppPatch, p: UserPrincipal = Depends(owner), db: Session = Depends(get_db)):
     a = _app(db, p, app_id)
     changes = body.model_dump(exclude_unset=True)
+    for key in NOT_NULLABLE:  # "name": null or "active": null means "leave as it is", never a NULL column
+        if changes.get(key, ...) is None:
+            del changes[key]
     if "webhook_url" in changes:
         changes["webhook_url"] = _check_webhook(changes["webhook_url"])
-    if "name" in changes and changes["name"] is not None:
+    if "name" in changes:
         changes["name"] = changes["name"].strip()
+        if not changes["name"]:
+            raise HTTPException(422, "name must not be blank")
     for k, v in changes.items():
         setattr(a, k, v)
     audit.record(db, p.tenant_id, f"user:{p.user.id}", "source_app.updated", "source_app", a.id, changes)
@@ -151,8 +159,8 @@ class OAuthIn(BaseModel):
 
 @router.put("/apps/{app_id}/oauth")
 def set_oauth(app_id: str, body: OAuthIn, p: UserPrincipal = Depends(owner), db: Session = Depends(get_db)):
-    """Turn OAuth client credentials on (returns the client secret once) or off (existing tokens expire within
-    the hour; new ones are refused)."""
+    """Turn OAuth client credentials on (returns the client secret once) or off (tokens already issued stop working
+    at once; new ones are refused)."""
     a = _app(db, p, app_id)
     secret = None
     if body.enabled and not a.oauth_client_id:
@@ -230,7 +238,7 @@ def connector_out(c: ConnectorConfig) -> dict:
             "last_run_at": _iso(c.last_run_at), "last_error": c.last_error}
 
 
-NOTIFY = {"assigned", "escalated", "deferred"}
+NOTIFY = {"assigned", "escalated", "deferred", "sla_reminder"}
 STATUSES = {"approved", "rejected", "changes_requested"}
 
 
@@ -257,6 +265,14 @@ def _validate_config(db: Session, tenant_id: str, kind: str, config: dict) -> No
     for key in [k for k in config if k.endswith("_folder")]:
         if not isinstance(config[key], str):
             raise HTTPException(422, f"{key} must be a folder path")
+    if isinstance(config.get("max_items"), str):
+        # Form fields send text: "" means the default, digits are a number.
+        text = config["max_items"].strip()
+        config["max_items"] = int(text) if text.isdigit() else (None if not text else text)
+    if config.get("max_items") is not None:
+        value = config["max_items"]
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 5000:
+            raise HTTPException(422, "max_items must be a whole number from 1 to 5000")
     missing = [k for k in spec["required"] if not str(config.get(k) or "").strip()]
     needs_workflow = spec["polls"] is True or (isinstance(spec["polls"], str) and config.get(spec["polls"]))
     if needs_workflow and not config.get("workflow_id"):
@@ -278,17 +294,18 @@ def _validate_config(db: Session, tenant_id: str, kind: str, config: dict) -> No
 
 
 @router.get("/connectors")
-def list_connectors(p: UserPrincipal = Depends(owner), db: Session = Depends(get_db)):
-    return [connector_out(c) for c in db.scalars(select(ConnectorConfig).where(ConnectorConfig.tenant_id == p.tenant_id)
-                                                 .order_by(ConnectorConfig.created_at)).all()]
+def list_connectors(response: Response, page: Page = Depends(), p: UserPrincipal = Depends(owner),
+                    db: Session = Depends(get_db)):
+    q = select(ConnectorConfig).where(ConnectorConfig.tenant_id == p.tenant_id).order_by(ConnectorConfig.created_at, ConnectorConfig.id)
+    return [connector_out(c) for c in paginate(db, q, page, response)]
 
 
 @router.get("/workflows")
-def list_workflows(p: UserPrincipal = Depends(owner), db: Session = Depends(get_db)):
+def list_workflows(response: Response, page: Page = Depends(), p: UserPrincipal = Depends(owner),
+                   db: Session = Depends(get_db)):
     """Current workflows by name, for choosing where connector submissions go."""
-    return [{"id": w.family_id, "name": w.name, "source_app_ids": w.source_app_ids}
-            for w in db.scalars(select(Workflow).where(Workflow.tenant_id == p.tenant_id, Workflow.is_current.is_(True))
-                                .order_by(Workflow.name)).all()]
+    q = select(Workflow).where(Workflow.tenant_id == p.tenant_id, Workflow.is_current.is_(True)).order_by(Workflow.name, Workflow.id)
+    return [{"id": w.family_id, "name": w.name, "source_app_ids": w.source_app_ids} for w in paginate(db, q, page, response)]
 
 
 @router.get("/connector-kinds")
@@ -350,7 +367,8 @@ def delete_connector(connector_id: str, p: UserPrincipal = Depends(owner), db: S
 
 @router.post("/connectors/{connector_id}/run")
 def run_connector(connector_id: str, p: UserPrincipal = Depends(owner), db: Session = Depends(get_db)):
-    """Run a polling connector now and report the outcome (also a quick way to test the settings)."""
+    """Run a polling connector now and report the outcome (also a quick way to test the settings).
+    409 while the connector is already running (on the scheduler or another request): they share one lock."""
     c = _connector(db, p, connector_id)
     if not connectors.polls(c):
         raise HTTPException(409, "this connector reacts to events and has nothing to run")
@@ -358,5 +376,7 @@ def run_connector(connector_id: str, p: UserPrincipal = Depends(owner), db: Sess
         raise HTTPException(409, "switch the connector on first")
     db.commit()
     result = connectors.poll_one(c.id, force=True)
+    if result.get("busy"):
+        raise HTTPException(409, "this connector is running right now; try again in a moment")
     db.expire_all()
     return {**connector_out(db.get(ConnectorConfig, c.id)), "result": result}

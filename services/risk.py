@@ -1,7 +1,8 @@
 """Risk engine: claim extraction and risk flags per span.
 
-With a model provider configured the Agno agents do the work; otherwise (or if a call fails)
-a deterministic heuristic produces the same flag categories, so the gate never runs unflagged.
+With a model provider configured the Agno agents do the work; otherwise (or if the model's answer is unusable)
+a deterministic heuristic produces the same flag categories, so the gate never runs unflagged. A provider outage
+raises ModelUnavailable, so the pipeline retries the submission instead of quietly using the heuristics.
 """
 
 from __future__ import annotations
@@ -144,36 +145,35 @@ def _approved_corpus(session: Session, tenant_id: str, limit: int = 500) -> list
     return [_tokens(r[0]) for r in rows]
 
 
-def flag_submission(session: Session, submission: Submission, workflow: Workflow) -> list[RiskFlag]:
-    primary = [d for d in submission.documents if d.role == "primary"]
+def _reference_text(session: Session, submission: Submission) -> str:
     refs = [d for d in submission.documents if d.role == "reference"]
-    spans = list(
-        session.scalars(
-            select(Span)
-            .join(Section, Section.id == Span.section_id)
-            .where(Span.document_id.in_([d.id for d in primary]), Span.review_only.is_(False))
-            .order_by(Section.order, Span.order)
-        ).all()
-    )
-    reference_text = "\n".join(
-        s for s in session.scalars(select(Span.text).where(Span.document_id.in_([d.id for d in refs]))).all()
-    ) if refs else ""
+    if not refs:
+        return ""
+    return "\n".join(s for s in session.scalars(select(Span.text).where(Span.document_id.in_([d.id for d in refs]))).all())
 
+
+def _run_engine(session: Session, submission: Submission, spans: list[Span], reference_text: str,
+                use_llm: bool) -> tuple[ClaimList, RiskFlagList, str]:
+    """Claims and flags for these spans: the LLM agents when use_llm (a provider outage raises ModelUnavailable),
+    the heuristics otherwise or when the model's answer is unusable (recorded as a fallback)."""
     gateway = get_gateway()
-    engine = "heuristic"
-    claims = flags = None
-    if gateway.enabled:
+    if use_llm and gateway.enabled:
         from agents import claim_extractor, risk_flagger
 
         claims = claim_extractor.run(gateway, [{"span_id": s.id, "text": s.text} for s in spans])
-        if claims is not None:
-            flags = risk_flagger.run(gateway, claims, reference_text, submission.risk_tier)
+        flags = risk_flagger.run(gateway, claims, reference_text, submission.risk_tier) if claims is not None else None
         if flags is not None:
-            engine = f"llm:{gateway.provider}"
-    if flags is None:
-        claims = heuristic_claims(spans)
-        flags = heuristic_flags(claims, reference_text, submission.risk_tier, _approved_corpus(session, submission.tenant_id))
+            return claims, flags, f"llm:{gateway.provider}"
+        audit.record(session, submission.tenant_id, "system:risk_engine", "model.fallback", "submission", submission.id,
+                     {"agent": "risk_flagger" if claims is not None else "claim_extractor", "reason": "invalid_output",
+                      "engine": "heuristic"})
+    claims = heuristic_claims(spans)
+    flags = heuristic_flags(claims, reference_text, submission.risk_tier, _approved_corpus(session, submission.tenant_id))
+    return claims, flags, "heuristic"
 
+
+def _persist(session: Session, submission: Submission, workflow: Workflow, spans: list[Span], claims: ClaimList,
+             flags: RiskFlagList) -> list[RiskFlag]:
     valid_ids = {s.id for s in spans}
     mandatory_sev = set((workflow.risk_policy or {}).get("mandatory_severities", ["high"]))
     merged: dict[tuple[str, str], RiskFlagOut] = {}
@@ -183,9 +183,8 @@ def flag_submission(session: Session, submission: Submission, workflow: Workflow
         key = (f.span_id, f.category)
         if key not in merged or SEVERITY_ORDER[f.severity] > SEVERITY_ORDER[merged[key].severity]:
             merged[key] = f
-
     rows = []
-    claim_tags = {}
+    claim_tags: dict[str, set] = {}
     for c in (claims.claims if claims else []):
         claim_tags.setdefault(c.span_id, set()).update(c.tags)
     for f in merged.values():
@@ -197,9 +196,45 @@ def flag_submission(session: Session, submission: Submission, workflow: Workflow
         session.add(row)
         rows.append(row)
     session.flush()
+    return rows
+
+
+def flag_submission(session: Session, submission: Submission, workflow: Workflow) -> list[RiskFlag]:
+    primary = [d for d in submission.documents if d.role == "primary"]
+    spans = list(
+        session.scalars(
+            select(Span)
+            .join(Section, Section.id == Span.section_id)
+            .where(Span.document_id.in_([d.id for d in primary]), Span.review_only.is_(False))
+            .order_by(Section.order, Span.order)
+        ).all()
+    )
+    claims, flags, engine = _run_engine(session, submission, spans, _reference_text(session, submission), use_llm=True)
+    rows = _persist(session, submission, workflow, spans, claims, flags)
     audit.record(
         session, submission.tenant_id, "system:risk_engine", "risk.flagged", "submission", submission.id,
         {"engine": engine, "claims": len(claims.claims) if claims else 0, "flags": len(rows),
          "mandatory": sum(1 for r in rows if r.mandatory)},
     )
     return rows
+
+
+def engine_used(session: Session, submission: Submission) -> str | None:
+    """The engine that flagged this submission's genuine spans (from its risk.flagged audit event)."""
+    from db.models import AuditEvent
+
+    ev = session.scalars(
+        select(AuditEvent).where(AuditEvent.tenant_id == submission.tenant_id, AuditEvent.entity_id == submission.id,
+                                 AuditEvent.action == "risk.flagged").order_by(AuditEvent.seq.desc())
+    ).first()
+    return (ev.payload or {}).get("engine") if ev else None
+
+
+def flag_spans(session: Session, submission: Submission, workflow: Workflow, spans: list[Span]) -> list[RiskFlag]:
+    """Flag extra spans (a canary) exactly as the genuine spans were flagged: the same engine, the same reference
+    documents and approved corpus, the same severity rules for the risk tier and the same mandatory rule. Writes
+    no risk.flagged event, so the audit trail does not show that an extra span was flagged."""
+    engine = engine_used(session, submission) or "heuristic"
+    claims, flags, _ = _run_engine(session, submission, spans, _reference_text(session, submission),
+                                   use_llm=engine.startswith("llm:"))
+    return _persist(session, submission, workflow, spans, claims, flags)

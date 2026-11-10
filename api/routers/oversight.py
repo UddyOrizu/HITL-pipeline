@@ -33,7 +33,7 @@ def dashboard(days: int = Query(30, ge=1, le=365), p: UserPrincipal = Depends(ov
     return assurance.dashboard(db, p.tenant_id, days)
 
 
-def _actions(s: Submission) -> list[str]:
+def _actions(s: Submission, db: Session | None = None) -> list[str]:
     """What an oversight lead can do with this item now."""
     acts = []
     if s.hold_reason in workflow.DECISION_HOLDS and s.status in ("in_review", "spot_check"):
@@ -42,7 +42,7 @@ def _actions(s: Submission) -> list[str]:
         acts.append("assign")
     if s.hold_reason and s.status in ("in_review", "spot_check"):
         acts.append("defer")
-    if s.status == "deferred":
+    if s.status == "deferred" and not s.purged_at and (db is None or workflow.can_retry(db, s)[0]):
         acts.append("retry")
     if s.status not in workflow.FINAL:
         acts.append("cancel")
@@ -71,7 +71,7 @@ def _sub_row(db: Session, s: Submission) -> dict:
             "title": (s.meta or {}).get("title"), "source_app": app.name if app else None,
             "created_at": s.created_at.isoformat() + "Z", "updated_at": s.updated_at.isoformat() + "Z",
             "final_outcome": s.final_outcome, "score": score.score if score else None,
-            "processing_error": s.processing_error, "deferred": _deferral(db, s), "actions": _actions(s)}
+            "processing_error": s.processing_error, "deferred": _deferral(db, s), "actions": _actions(s, db)}
 
 
 @router.get("/oversight/submissions")
@@ -243,6 +243,10 @@ def _data(body: WorkflowIn) -> dict:
     return data
 
 
+def _number(v) -> bool:
+    return isinstance(v, int | float) and not isinstance(v, bool) and v == v  # not NaN
+
+
 def _validate(body: WorkflowIn, db: Session, tenant_id: str) -> None:
     for st in body.stages:
         if st.team_id:
@@ -256,8 +260,10 @@ def _validate(body: WorkflowIn, db: Session, tenant_id: str) -> None:
         raise HTTPException(422, "cap_policy.overflow must be queue, escalate or defer")
     for k in ("daily_minutes", "hourly_minutes", "team_daily_minutes", "max_consecutive_same_source"):
         v = body.cap_policy.get(k)
-        if v is not None and (not isinstance(v, int | float) or v < 0):
+        if v is not None and (not _number(v) or v < 0):
             raise HTTPException(422, f"cap_policy.{k} must be a positive number or empty")
+    if body.cap_policy.get("max_consecutive_same_source") is not None and             float(body.cap_policy["max_consecutive_same_source"]) != int(body.cap_policy["max_consecutive_same_source"]):
+        raise HTTPException(422, "cap_policy.max_consecutive_same_source must be a whole number")
     action = body.telemetry_policy.get("action")
     if action and action not in ("warn", "block", "flag"):
         raise HTTPException(422, "telemetry_policy.action must be warn, block or flag")
@@ -267,6 +273,26 @@ def _validate(body: WorkflowIn, db: Session, tenant_id: str) -> None:
     below = body.assurance_policy.get("below_action")
     if below and below not in ("block", "second_review", "release_flag"):
         raise HTTPException(422, "assurance_policy.below_action must be block, second_review or release_flag")
+    min_score = body.assurance_policy.get("min_score")
+    if min_score is not None and (not _number(min_score) or not 0 <= min_score <= 100):
+        raise HTTPException(422, "assurance_policy.min_score must be a number from 0 to 100")
+    weights = body.assurance_policy.get("weights")
+    if weights is not None:
+        if not isinstance(weights, dict):
+            raise HTTPException(422, "assurance_policy.weights must be an object of component weights")
+        unknown = set(weights) - set(assurance.DEFAULT_WEIGHTS)
+        if unknown:
+            raise HTTPException(422, f"assurance_policy.weights: unknown components {sorted(unknown)}; use "
+                                     f"{', '.join(assurance.DEFAULT_WEIGHTS)}")
+        if any(v is not None and (not _number(v) or not 0 <= v <= 1) for v in weights.values()):
+            raise HTTPException(422, "assurance_policy.weights must be numbers from 0 to 1 (they are scaled to sum to 1)")
+        if weights and not any(_number(v) and v > 0 for v in weights.values()):
+            raise HTTPException(422, "assurance_policy.weights: at least one weight must be above 0")
+    for k in ("min_reading_ratio", "min_coverage"):
+        v = body.telemetry_policy.get(k)
+        if v is not None and (not _number(v) or v < 0 or (k == "min_coverage" and v > 1)):
+            raise HTTPException(422, f"telemetry_policy.{k} must be a non-negative number"
+                                     + (" no greater than 1" if k == "min_coverage" else ""))
     sev = body.risk_policy.get("mandatory_severities")
     if sev is not None and (not isinstance(sev, list) or set(sev) - SEVERITIES):
         raise HTTPException(422, "risk_policy.mandatory_severities must be a list of low, medium, high")
@@ -284,14 +310,16 @@ def _validate(body: WorkflowIn, db: Session, tenant_id: str) -> None:
 
 
 @router.get("/admin/workflows")
-def list_workflows(include_history: bool = False, family_id: str | None = None, p: UserPrincipal = Depends(oversight),
-                   db: Session = Depends(get_db)):
+def list_workflows(response: Response, include_history: bool = False, family_id: str | None = None,
+                   page: Page = Depends(), p: UserPrincipal = Depends(oversight), db: Session = Depends(get_db)):
+    """Workflows (current versions unless include_history). Paged with offset and limit; the total is in
+    X-Total-Count and the next page's offset in X-Next-Offset."""
     q = select(Workflow).where(Workflow.tenant_id == p.tenant_id)
     if family_id:
         q = q.where(Workflow.family_id == family_id)
     if not include_history:
         q = q.where(Workflow.is_current.is_(True))
-    return [wf_out(w) for w in db.scalars(q.order_by(Workflow.name, Workflow.version)).all()]
+    return [wf_out(w) for w in paginate(db, q.order_by(Workflow.name, Workflow.version, Workflow.id), page, response)]
 
 
 @router.get("/admin/source-apps")

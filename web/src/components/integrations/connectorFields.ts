@@ -22,7 +22,13 @@ export const TEAMS_EVENTS = [
   { key: "assigned", label: "A reviewer is assigned an item" },
   { key: "escalated", label: "An item is escalated" },
   { key: "deferred", label: "An item is deferred" },
+  { key: "sla_reminder", label: "A review task has used 75% of its SLA" },
 ];
+
+const MAX_ITEMS = (what: string): FieldDef => ({
+  key: "max_items", label: `Most ${what} read per run`, type: "text", placeholder: "500", group: "advanced",
+  help: "A whole number from 1 to 5000. Leave empty for 500.",
+});
 
 export const KIND_INFO: Record<string, KindInfo> = {
   sharepoint: {
@@ -39,6 +45,10 @@ export const KIND_INFO: Record<string, KindInfo> = {
       { key: "approved_folder", label: "Approved folder", type: "text", fallback: "Review/Approved", group: "advanced" },
       { key: "rejected_folder", label: "Rejected folder", type: "text", fallback: "Review/Rejected", group: "advanced" },
       { key: "changes_folder", label: "Changes requested folder", type: "text", fallback: "Review/Changes requested", group: "advanced" },
+      { key: "deferred_folder", label: "Deferred folder", type: "text", fallback: "Review/Deferred", group: "advanced",
+        help: "Use the inbox folder to leave deferred files where they are." },
+      { key: "cancelled_folder", label: "Cancelled folder", type: "text", fallback: "Review/Cancelled", group: "advanced" },
+      MAX_ITEMS("files"),
       { key: "content_origin", label: "Content origin", type: "origin", fallback: "mixed", group: "advanced", help: "Who wrote the documents: AI, a person, or a mix." },
     ],
   },
@@ -48,7 +58,7 @@ export const KIND_INFO: Record<string, KindInfo> = {
     fields: [
       { key: "webhook_url", label: "Teams webhook URL", type: "secret", help: "A Teams Workflows (Power Automate) or incoming-webhook URL for the channel. Stored encrypted." },
       { key: "app_base_url", label: "Reviewer app address (optional)", type: "url", placeholder: "https://review.example.com", help: "Where card buttons link to. Defaults to the platform's app URL." },
-      { key: "notify", label: "Post a card when", type: "notify", fallback: "assigned,escalated,deferred" },
+      { key: "notify", label: "Post a card when", type: "notify", fallback: "assigned,escalated,deferred,sla_reminder" },
     ],
   },
   jira: {
@@ -66,6 +76,7 @@ export const KIND_INFO: Record<string, KindInfo> = {
       { key: "transitions", label: "Transitions after a decision (JSON, optional)", type: "json",
         placeholder: '{\n  "approved": "31",\n  "rejected": "41",\n  "changes_requested": "21"\n}',
         help: "Jira transition IDs per decision. Leave empty to only comment.", group: "advanced" },
+      MAX_ITEMS("tickets"),
     ],
   },
   azure_devops: {
@@ -85,6 +96,7 @@ export const KIND_INFO: Record<string, KindInfo> = {
         help: "Work item state per decision. Leave empty to only add a history entry.", group: "advanced" },
       { key: "base_url", label: "Server URL (optional)", type: "url", placeholder: "https://dev.azure.com/<organization>",
         help: "Only for Azure DevOps Server or a custom domain.", group: "advanced" },
+      MAX_ITEMS("work items"),
     ],
   },
 };

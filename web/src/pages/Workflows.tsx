@@ -1,5 +1,5 @@
 import { Fragment, useState } from "react";
-import { api, qs } from "../api";
+import { api, apiAll, qs } from "../api";
 import { Badge, Empty, ErrorBox, label, useLoad, when } from "../components/ui";
 import "./oversight.css";
 
@@ -178,6 +178,12 @@ function Editor({ wf, teams, apps, onDone, onCancel }: {
       <div className="field-row">
         <div><label>Daily cap (review minutes)</label><NumberInput min={0} placeholder="Default 240" value={f.cap_policy.daily_minutes} onChange={(v) => set(["cap_policy", "daily_minutes"], v)} /></div>
         <div><label>Hourly cap</label><NumberInput min={0} placeholder="Default 90" value={f.cap_policy.hourly_minutes} onChange={(v) => set(["cap_policy", "hourly_minutes"], v)} /></div>
+        <div>
+          <label htmlFor="wf-team-ceiling">Team daily ceiling (minutes)</label>
+          <NumberInput id="wf-team-ceiling" min={1} placeholder="None" value={f.cap_policy.team_daily_minutes}
+            onChange={(v) => set(["cap_policy", "team_daily_minutes"], v)} />
+          <div className="sub" style={{ fontSize: 12, marginTop: 2 }}>Total review minutes per day for the stage's team on this workflow. Empty: none (the team's own ceiling, if set, applies).</div>
+        </div>
         <div><label>When at capacity</label>
           <select value={f.cap_policy.overflow || "queue"} onChange={(e) => set(["cap_policy", "overflow"], e.target.value)}>
             <option value="queue">Queue</option><option value="escalate">Queue and escalate</option><option value="defer">Defer to source</option>
@@ -296,9 +302,9 @@ function History({ wf, teams }: { wf: WF; teams: Team[] }) {
 // --- Page ---------------------------------------------------------------------------------------------------
 
 export default function Workflows() {
-  const { data, error, loading, reload } = useLoad(() => api<WF[]>("/v1/admin/workflows"));
-  const { data: teams } = useLoad(() => api<Team[]>("/v1/admin/teams").catch(() => [] as Team[]));
-  const { data: apps } = useLoad(() => api<SourceApp[]>("/v1/admin/source-apps").catch(() => [] as SourceApp[]));
+  const { data, error, loading, reload } = useLoad(() => apiAll<WF>("/v1/admin/workflows"));
+  const { data: teams } = useLoad(() => apiAll<Team>("/v1/admin/teams").catch(() => [] as Team[]));
+  const { data: apps } = useLoad(() => apiAll<SourceApp>("/v1/admin/source-apps").catch(() => [] as SourceApp[]));
   const [editing, setEditing] = useState<WF | null>(null);
   const [history, setHistory] = useState<string | null>(null);
   const [msg, setMsg] = useState("");

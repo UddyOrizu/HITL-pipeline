@@ -3,6 +3,7 @@ source app."""
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 
 import httpx
@@ -50,7 +51,8 @@ def por_client(source_app_id: str, tenant_id: str) -> httpx.Client:
         client = _por_client_factory(source_app_id, tenant_id)
         client.headers["Authorization"] = f"Bearer {token}"
         return client
-    return httpx.Client(base_url=get_settings().public_base_url, headers={"Authorization": f"Bearer {token}"}, timeout=60)
+    # settings.api_url: the internal address when one is set (http://api:8000 in Compose), not the public URL.
+    return httpx.Client(base_url=get_settings().api_url, headers={"Authorization": f"Bearer {token}"}, timeout=60)
 
 
 class ConnectorError(RuntimeError):
@@ -61,3 +63,59 @@ def check(resp: httpx.Response) -> httpx.Response:
     if resp.status_code >= 400:
         raise ConnectorError(f"{resp.request.method} {resp.request.url} -> {resp.status_code}: {resp.text[:300]}")
     return resp
+
+
+def content_hash(*parts) -> str:
+    """A short fingerprint of the content a connector submits, to tell a revised ticket from one that only had
+    its status or comments changed (our own write-back changes Jira's `updated` and Azure DevOps' System.Rev)."""
+    import hashlib
+
+    return hashlib.sha256(json.dumps(parts, sort_keys=True, default=str).encode()).hexdigest()[:32]
+
+
+def save_state(cfg: ConnectorConfig, **keys) -> None:
+    """Write some top-level keys of the connector's state, leaving the others as they are now in the database.
+
+    The polling step and the decision event handlers both keep state on the configuration; re-reading the row
+    (locked on Postgres) just before writing keeps one from overwriting what the other recorded meanwhile."""
+    from sqlalchemy.orm import object_session
+
+    session = object_session(cfg)
+    if session is not None and cfg.id is not None:
+        session.flush()
+        session.refresh(cfg, ["state"], with_for_update=True)
+    state = dict(cfg.state or {})
+    state.update(keys)
+    cfg.state = state
+
+
+MAX_WRITEBACKS = 1000
+
+
+def writeback_done(cfg: ConnectorConfig, key: str) -> dict:
+    """Steps of a decision write-back already done (e.g. {"comment": true}), so a retried event skips them."""
+    return dict(((cfg.state or {}).get("writeback") or {}).get(key) or {})
+
+
+def mark_writeback(cfg: ConnectorConfig, key: str, step: str, value=True) -> None:
+    """Record one finished write-back step in its own transaction, so it survives a later step failing (the event
+    handler's own session is rolled back then, and the retry must not comment or attach twice)."""
+    from db.session import session_scope
+
+    with session_scope(cfg.tenant_id) as s:
+        row = s.get(ConnectorConfig, cfg.id, with_for_update=True)
+        if row is None:
+            return
+        state = dict(row.state or {})
+        marks = dict(state.get("writeback") or {})
+        entry = dict(marks.pop(key, None) or {})
+        entry[step] = value
+        marks[key] = entry  # most recent last
+        while len(marks) > MAX_WRITEBACKS:
+            marks.pop(next(iter(marks)))
+        state["writeback"] = marks
+        row.state = state
+    # Keep the caller's copy in step, without marking it dirty in the caller's session.
+    from sqlalchemy.orm.attributes import set_committed_value
+
+    set_committed_value(cfg, "state", {**(cfg.state or {}), "writeback": marks})

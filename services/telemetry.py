@@ -30,27 +30,57 @@ MIN_SECTION_DWELL = 1.5
 DEFAULT_POLICY = {"min_reading_ratio": 0.3, "min_coverage": 0.6, "action": "warn"}
 
 
+FIRST_BATCH_GRACE = timedelta(seconds=60)  # clock skew allowed before the task's assignment, first batch only
+BATCH_SLACK = timedelta(seconds=10)  # network delay and clock jitter allowed between batches
+FUTURE_SLACK = timedelta(seconds=5)
+DWELL_SLACK_SECONDS = 2.0
+
+
+def _parse_ts(ts, now: datetime) -> datetime | None:
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(str(ts).replace("Z", "+00:00")).replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
 def ingest(session: Session, task: ReviewTask, events: list[dict]) -> int:
-    """Store a batch from the reviewer client. Returns number stored."""
+    """Store a batch from the reviewer client. Returns number stored.
+
+    The client's timestamps are trusted for ordering only. The server's receive time bounds what a batch can
+    claim: event times are shifted onto the server clock when the client clock runs ahead, then clamped to the
+    window since the previous accepted batch for this task (or since assignment, for the first batch), and no
+    section dwell may exceed that window. So active time and dwell can never add up to more than the wall-clock
+    time the server has seen pass, however the client fills in its events."""
     now = utcnow()
+    prev_batch = session.scalar(select(func.max(TelemetryEvent.created_at)).where(TelemetryEvent.review_task_id == task.id))
+    floor = (prev_batch - BATCH_SLACK) if prev_batch else (task.assigned_at - FIRST_BATCH_GRACE)
+    floor = max(floor, task.assigned_at - FIRST_BATCH_GRACE)
+    ceiling = now + FUTURE_SLACK
+    # Dwell a section can claim in this batch: the wall-clock time since the previous batch arrived (or since
+    # assignment, with the first-batch grace) plus a little slack, so repeated batches cannot inflate it.
+    since = prev_batch or (task.assigned_at - FIRST_BATCH_GRACE)
+    window = max(0.0, (now - since).total_seconds() + DWELL_SLACK_SECONDS)
+
+    accepted = [e for e in events[:1000] if isinstance(e, dict) and e.get("type") in EVENT_TYPES]
+    parsed = [_parse_ts(e.get("client_ts"), now) for e in accepted]
+    latest = max((t for t in parsed if t is not None), default=None)
+    # A client clock running ahead of the server: move the whole batch back so its last event is "now".
+    shift = (now - latest) if latest is not None and latest > ceiling else timedelta(0)
     stored = 0
-    for e in events[:1000]:
-        etype = e.get("type")
-        if etype not in EVENT_TYPES:
-            continue
-        ts = e.get("client_ts")
-        try:
-            client_ts = datetime.fromisoformat(str(ts).replace("Z", "+00:00")).replace(tzinfo=None) if ts else now
-        except ValueError:
-            client_ts = now
-        # Clamp clock skew: client time can be off, but not in the future or before the task existed.
-        client_ts = min(max(client_ts, task.assigned_at - timedelta(minutes=1)), now + timedelta(seconds=5))
+    for e, client_ts in zip(accepted, parsed, strict=True):
+        client_ts = (client_ts + shift) if client_ts is not None else now
+        client_ts = min(max(client_ts, floor), ceiling)
         value = e.get("value")
+        value = float(value) if isinstance(value, int | float) and not isinstance(value, bool) else None
+        if value is not None and e.get("type") == "section_in_view":
+            value = max(0.0, min(value, window))
         session.add(
             TelemetryEvent(
-                tenant_id=task.tenant_id, review_task_id=task.id, type=etype,
+                tenant_id=task.tenant_id, review_task_id=task.id, type=e.get("type"),
                 span_id=e.get("span_id"), section_id=e.get("section_id"),
-                value=float(value) if isinstance(value, int | float) else None, client_ts=client_ts, created_at=now,
+                value=value, client_ts=client_ts, created_at=now,
             )
         )
         stored += 1

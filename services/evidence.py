@@ -67,18 +67,33 @@ def build_record(session: Session, sub: Submission) -> dict:
 
     primary = [r for r in reviews if r["kind"] == "primary" and r["decision"]]
     spot = [r for r in reviews if r["kind"] == "spot_check" and r["decision"]]
+    spot_open = [r for r in reviews if r["kind"] == "spot_check" and r["status"] == "assigned"]
     spot_result = None
     if spot:
         agree = primary and spot[-1]["decision"]["outcome"] == primary[-1]["decision"]["outcome"]
-        spot_result = {"sampled": True, "agreement": bool(agree), "spot_check_outcome": spot[-1]["decision"]["outcome"]}
+        spot_result = {"sampled": True, "pending": False, "agreement": bool(agree),
+                       "spot_check_outcome": spot[-1]["decision"]["outcome"]}
+    elif spot_open or sub.status == "spot_check":
+        # Sampled for a second review that has not been decided yet.
+        spot_result = {"sampled": True, "pending": True, "agreement": None, "spot_check_outcome": None}
 
     ids = [sub.id] + [d.id for d in sub.documents] + [t.id for t in tasks]
+    events = audit.events_for(session, sub.tenant_id, ids)
     trail = [
         {"seq": e.seq, "at": e.created_at.isoformat() + "Z", "actor": e.actor, "action": e.action, "entity": e.entity,
          "entity_id": e.entity_id, "payload": e.payload, "prev_hash": e.prev_hash, "hash": e.hash}
-        for e in audit.events_for(session, sub.tenant_id, ids)
+        for e in events
     ]
-    chain = audit.verify_chain(session, sub.tenant_id)
+    # Verify this submission's events and their links to the chain (not the whole tenant chain, which grows
+    # without bound), plus the current head; record the head so a later full verification can detect events
+    # removed from the end of the chain. GET /v1/audit/verify still walks the whole chain.
+    head_seq, head_hash = audit.head(session, sub.tenant_id)
+    from db.models import AuditEvent
+
+    head_event = session.scalars(select(AuditEvent).where(AuditEvent.tenant_id == sub.tenant_id,
+                                                          AuditEvent.seq == head_seq)).first() if head_seq else None
+    checked = list(events) + ([head_event] if head_event is not None and head_event.seq not in {e.seq for e in events} else [])
+    chain_valid = audit.verify_events(session, sub.tenant_id, checked)
 
     record = {
         "schema": "proof-of-review/evidence/v1",
@@ -109,7 +124,8 @@ def build_record(session: Session, sub: Submission) -> dict:
         "spot_check": spot_result or {"sampled": False},
         "assurance": assurance.score_payload(assurance.latest(session, sub.id)),
         "audit_trail": trail,
-        "audit_chain": {"valid": chain["valid"], "events_in_tenant_chain": chain["count"], "head_hash": chain.get("head")},
+        "audit_chain": {"valid": chain_valid, "scope": "submission_events", "events_verified": len(checked),
+                        "events_in_tenant_chain": head_seq, "head_seq": head_seq, "head_hash": head_hash},
     }
     outbound.assert_no_canary_leak(session, record, [sub.id])
     return record
@@ -168,6 +184,7 @@ def render_pdf(record: dict) -> bytes:
         parts.append("<p>No canary was present in this review.</p>")
     sc = record["spot_check"]
     parts.append("<h2>Spot-check</h2><p>" + (
+        "Sampled for blind second review: pending." if sc.get("pending") else
         f"Sampled for blind second review: {'agreement' if sc.get('agreement') else 'disagreement, escalated to oversight'}."
         if sc.get("sampled") else "Not sampled.") + "</p>")
     parts.append("<h2>Risk flags</h2><table>")
@@ -177,8 +194,9 @@ def render_pdf(record: dict) -> bytes:
                            "yes" if f["opened"] else "no", "yes" if f["acknowledged"] else "no"]))
     parts.append("</table>")
     ch = record["audit_chain"]
-    parts.append(f"<h2>Audit trail</h2><p>Tenant chain valid: <b>{'yes' if ch['valid'] else 'NO'}</b>; "
-                 f"head hash {html.escape(str(ch['head_hash']))}.</p><table>")
+    parts.append(f"<h2>Audit trail</h2><p>Tenant chain valid for this submission's events and their links: "
+                 f"<b>{'yes' if ch['valid'] else 'NO'}</b>; chain head seq {ch.get('head_seq', '-')}, "
+                 f"hash {html.escape(str(ch['head_hash']))}.</p><table>")
     parts.append(_row(["Seq", "Time", "Actor", "Action", "Hash"], True))
     for e in record["audit_trail"]:
         parts.append(_row([e["seq"], e["at"], e["actor"][:28], e["action"], e["hash"][:16] + "..."]))
@@ -209,8 +227,10 @@ def generate_pack(session: Session, sub: Submission) -> EvidencePack:
     stamp = utcnow().strftime("%Y%m%dT%H%M%S")
     pdf_uri = storage.put(f"{sub.tenant_id}/{sub.id}/evidence/{stamp}.pdf", pdf, "application/pdf")
     json_uri = storage.put(f"{sub.tenant_id}/{sub.id}/evidence/{stamp}.json", data_json, "application/json")
+    chain = record["audit_chain"]
     pack = EvidencePack(tenant_id=sub.tenant_id, submission_id=sub.id, file_uri=pdf_uri, json_uri=json_uri,
-                        sha256=hashlib.sha256(pdf).hexdigest(), generated_at=utcnow())
+                        sha256=hashlib.sha256(pdf).hexdigest(), generated_at=utcnow(),
+                        audit_head_seq=chain["head_seq"] or None, audit_head_hash=chain["head_hash"] if chain["head_seq"] else None)
     session.add(pack)
     session.flush()
     audit.record(session, sub.tenant_id, "system:evidence", "evidence.generated", "submission", sub.id,

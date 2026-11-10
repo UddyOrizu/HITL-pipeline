@@ -6,3 +6,7 @@ web/node_modules
 web/dist
 infra/terraform/.terraform
 .git
+.env
+**/.DS_Store
+**/*.tsbuildinfo
+.claude

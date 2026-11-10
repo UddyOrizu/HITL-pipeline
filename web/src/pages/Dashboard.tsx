@@ -27,22 +27,32 @@ function RateTable({ title, rows }: { title: string; rows: Rate[] }) {
 
 export default function Dashboard() {
   const [days, setDays] = useState(30);
-  const { data: d, error } = useLoad(() => api<any>(`/v1/oversight/dashboard?days=${days}`), [days]);
-  if (error) return <ErrorBox error={error} />;
-  if (!d) return <Empty>Loading…</Empty>;
+  const { data: d, error, loading, reload } = useLoad(() => api<any>(`/v1/oversight/dashboard?days=${days}`), [days]);
+  // The period selector stays usable when loading fails: the error is shown in place of the figures, with a retry.
+  const head = (
+    <div className="page-head">
+      <div>
+        <h1>Assurance dashboard</h1>
+        <div className="sub">How credible approvals have been over the last {days} days.{loading && d ? " Updating…" : ""}</div>
+      </div>
+      <select value={days} onChange={(e) => setDays(Number(e.target.value))} style={{ width: 140 }} aria-label="Period">
+        {[7, 30, 90, 365].map((n) => <option key={n} value={n}>Last {n} days</option>)}
+      </select>
+    </div>
+  );
+  const failed = error ? (
+    <div className="btn-row" style={{ alignItems: "center", marginBottom: 16 }}>
+      <div style={{ flex: 1 }}><ErrorBox error={error} /></div>
+      <button className="btn" onClick={reload} disabled={loading}>{loading ? "Retrying…" : "Retry"}</button>
+    </div>
+  ) : null;
+  // Figures from another period are not shown under a failed load.
+  if (!d || error) return <>{head}{failed || <Empty>Loading…</Empty>}</>;
   const dist = d.scores.distribution as Record<string, number>;
   const maxBucket = Math.max(1, ...Object.values(dist));
   return (
     <>
-      <div className="page-head">
-        <div>
-          <h1>Assurance dashboard</h1>
-          <div className="sub">How credible approvals have been over the last {days} days.</div>
-        </div>
-        <select value={days} onChange={(e) => setDays(Number(e.target.value))} style={{ width: 140 }}>
-          {[7, 30, 90, 365].map((n) => <option key={n} value={n}>Last {n} days</option>)}
-        </select>
-      </div>
+      {head}
 
       <div className="grid grid-4" style={{ marginBottom: 16 }}>
         <Stat label="Canary catch rate" value={pct(d.catch_rate.overall)} hint="Share of seeded errors reviewers caught" />
@@ -53,6 +63,7 @@ export default function Dashboard() {
 
       <div className="grid grid-2" style={{ marginBottom: 16 }}>
         <RateTable title="Catch rate by reviewer" rows={d.catch_rate.by_reviewer} />
+        <RateTable title="Catch rate by team" rows={d.catch_rate.by_team || []} />
         <RateTable title="Catch rate by difficulty" rows={d.catch_rate.by_difficulty} />
         <RateTable title="Catch rate by workflow" rows={d.catch_rate.by_workflow} />
         <RateTable title="Catch rate by week" rows={d.catch_rate.by_week} />

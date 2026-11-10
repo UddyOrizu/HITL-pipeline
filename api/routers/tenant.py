@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from api.deps import ROLES, UserPrincipal, get_db, require_roles
-from db.models import Submission, Tenant
+from db.models import Submission, Tenant, User
 from db.session import session_scope
 from services import audit, costs, netguard, retention, secretbox
 from services.sso import allowed_redirects as sso_redirects
@@ -42,6 +42,8 @@ class SsoIn(BaseModel):
     authorization_endpoint: str | None = None
     token_endpoint: str | None = None
     jwks_uri: str | None = None
+    # Require this provider: people in this organisation can't sign in through the platform's SSO provider.
+    enforce: bool = False
 
 
 class TenantSettingsIn(BaseModel):
@@ -61,6 +63,8 @@ def settings_out(t: Tenant) -> dict:
     sso_cfg = dict(st.get("sso") or {})
     if sso_cfg.get("client_secret"):
         sso_cfg["client_secret"] = secretbox.MASK
+    if sso_cfg:
+        sso_cfg["enforce"] = bool(sso_cfg.get("enforce"))
     return {
         "id": t.id, "name": t.name, "region": t.region, "active": t.active,
         "allow_admin_reviewers": bool(st.get("allow_admin_reviewers")),
@@ -109,6 +113,7 @@ def _check_sso(tenant_id: str, cfg: SsoIn, existing: dict) -> dict:
                     raise HTTPException(409, f"sso.domains already used by another organisation: {sorted(taken)}")
     out = {k: v for k, v in cfg.model_dump().items() if v not in (None, "", [])}
     out["enabled"] = cfg.enabled
+    out["enforce"] = bool(cfg.enforce)
     out["domains"] = domains
     out["auto_provision_roles"] = roles
     secret = cfg.client_secret
@@ -122,12 +127,27 @@ def _check_sso(tenant_id: str, cfg: SsoIn, existing: dict) -> dict:
     return out
 
 
+def _admin_reviewers(db: Session, tenant_id: str) -> list[User]:
+    users = db.scalars(select(User).where(User.tenant_id == tenant_id, User.active.is_(True)).order_by(User.email)).all()
+    return [u for u in users if {"admin", "reviewer"} <= set(u.roles or [])]
+
+
 @router.put("/tenant")
 def update_tenant(body: TenantSettingsIn, p: UserPrincipal = Depends(admin), db: Session = Depends(get_db)):
     t = db.get(Tenant, p.tenant_id)
     st = dict(t.settings or {})
+    before = settings_out(t)
     data = body.model_dump(exclude_unset=True)
     changed: list[str] = []
+    if data.get("allow_admin_reviewers") is False and st.get("allow_admin_reviewers"):
+        # Switching it off must not leave accounts that both set the review controls and are measured by them.
+        both = _admin_reviewers(db, t.id)
+        if both:
+            raise HTTPException(422, {
+                "code": "admin_reviewers_exist",
+                "message": "these accounts are both admin and reviewer; remove one of the two roles from each before "
+                           "turning allow_admin_reviewers off",
+                "users": [{"id": u.id, "email": u.email, "name": u.name} for u in both]})
     if "name" in data and data["name"]:
         t.name = data["name"].strip()
         changed.append("name")
@@ -157,8 +177,10 @@ def update_tenant(body: TenantSettingsIn, p: UserPrincipal = Depends(admin), db:
         raise HTTPException(422, "set usd_to_currency so model spend (priced in USD) can be shown in your currency")
     t.settings = st
     out = settings_out(t)
+    # Before and after values of what changed (the SSO client secret stays masked in both).
     audit.record(db, t.id, f"user:{p.user.id}", "tenant.settings_updated", "tenant", t.id,
-                 {"changed": changed, "settings": {k: out[k] for k in changed if k in out}})
+                 {"changed": changed, "settings": {k: out[k] for k in changed if k in out},
+                  "before": {k: before[k] for k in changed if k in before}})
     return out
 
 

@@ -8,7 +8,7 @@ import { LineChart } from "../components/charts/LineChart";
 import { ReportFilters, rangeDefaults, rangeError, useFilterOptions, useUrlState } from "../components/charts/ReportFilters";
 import { SortTable, type Column } from "../components/charts/SortTable";
 import { hours, periodLabel, type Row, type Series } from "../components/charts/util";
-import { Badge, Bar, Empty, ErrorBox, Stat, label, num, pct, riskTone, useLoad, when } from "../components/ui";
+import { Badge, Bar, Empty, ErrorBox, Stat, isoDate, label, num, pct, riskTone, useLoad, when } from "../components/ui";
 import "./reports.css";
 
 type Kpis = {
@@ -85,9 +85,9 @@ export default function Reports() {
         await download(`/v1/reports/overview${qs({ ...filters, format: "csv" })}`, `overview-${f.from}-to-${f.to}-by-${f.interval}.csv`);
       } else if (tab === "reviewers") {
         await download(`/v1/reports/reviewers${qs({ from: f.from, to: f.to, format: "csv" })}`, `reviewers-${f.from}-to-${f.to}.csv`);
-      } else if (sla.data) {
-        saveCsv(`overdue-tasks-${f.to}.csv`, ["title", "submission_id", "stage", "kind", "reviewer", "due_at", "hours_overdue", "escalated"],
-          sla.data.overdue.map((o) => [o.title ?? "", o.submission_id, o.stage ?? "", o.kind, o.reviewer ?? "", o.due_at, o.hours_overdue, o.escalated ? "yes" : "no"]));
+      } else {
+        // Same (unfiltered) report as the SLA tab, built by the API: current overdue tasks.
+        await download(`/v1/reports/sla${qs({ format: "csv" })}`, `overdue-tasks-${isoDate(new Date())}.csv`);
       }
     } catch (e) {
       setExportError(e);
@@ -394,20 +394,4 @@ function SlaTab({ state }: { state: LoadState<{ overdue: Overdue[] } | null> }) 
       )}
     </div>
   );
-}
-
-// The SLA report has no CSV format on the API, so build it here (with the same formula-injection guard).
-function saveCsv(filename: string, header: string[], rows: (string | number)[][]) {
-  const cell = (v: string | number) => {
-    let s = String(v);
-    if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
-    return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-  };
-  const text = [header, ...rows].map((r) => r.map(cell).join(",")).join("\n") + "\n";
-  const url = URL.createObjectURL(new Blob([text], { type: "text/csv;charset=utf-8" }));
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }

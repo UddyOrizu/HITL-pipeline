@@ -132,10 +132,15 @@ def inject(session: Session, submission: Submission, workflow: Workflow, force: 
 
         ctype = _rng.choice(T.TYPES)
         out = canary_generator.run(
-            gateway, [{"span_id": s.id, "text": s.text} for s in spans], ctype, T.DIFFICULTY[ctype], workflow.canary_domain
+            gateway, [{"span_id": s.id, "text": s.text} for s in spans], ctype, T.DIFFICULTY[ctype],
+            workflow.canary_domain, flagged_ids=flagged, rng=_rng,
         )
         if out and out.target_span_id in by_id and out.text.strip():
             picked = (out.type, out.mode, by_id[out.target_span_id], out.text.strip(), out.difficulty)
+        else:
+            # The model's canary was unusable: use a template instead, and record that we did.
+            audit.record(session, submission.tenant_id, "system:canary", "model.fallback", "submission", submission.id,
+                         {"agent": canary_generator.NAME, "reason": "invalid_output", "engine": "template"})
     if picked is None:
         tmpl = _template_canary(spans, flagged, workflow.canary_domain)
         if tmpl is None:
@@ -162,7 +167,7 @@ def inject(session: Session, submission: Submission, workflow: Workflow, force: 
     )
     session.add(canary)
     session.flush()
-    _mirror_flags(session, submission, span)
+    _mirror_flags(session, submission, workflow, span)
     audit.record(
         session, submission.tenant_id, "system:canary", "canary.injected", "submission", submission.id,
         {"canary_id": canary.id, "type": ctype, "difficulty": difficulty, "mode": mode},
@@ -170,22 +175,12 @@ def inject(session: Session, submission: Submission, workflow: Workflow, force: 
     return canary
 
 
-def _mirror_flags(session: Session, submission: Submission, span: Span) -> None:
-    """Flag the canary span the way a genuine span would be flagged, so the absence of flags is not a tell."""
-    from services.risk import heuristic_claims, heuristic_flags
+def _mirror_flags(session: Session, submission: Submission, workflow: Workflow, span: Span) -> None:
+    """Flag the canary span exactly the way a genuine span is flagged (same engine, references, severity rules for
+    the risk tier and mandatory rule), so neither the flags nor their absence is a tell."""
+    from services import risk
 
-    flags = heuristic_flags(heuristic_claims([span]), "", submission.risk_tier, []).flags
-    seen = set()
-    for f in flags:
-        if f.category in seen:
-            continue
-        seen.add(f.category)
-        session.add(RiskFlag(
-            tenant_id=submission.tenant_id, submission_id=submission.id, span_id=span.id, category=f.category,
-            severity="medium" if f.severity == "high" else f.severity, rationale=f.rationale, mandatory=False,
-            claim_text=None, claim_tags=[],
-        ))
-    session.flush()
+    risk.flag_spans(session, submission, workflow, [span])
 
 
 def canary_for_task(session: Session, task_id: str) -> Canary | None:

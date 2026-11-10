@@ -45,25 +45,59 @@ def constant_time_equal(a: str, b: str) -> bool:
     return hmac.compare_digest(a.encode(), b.encode())
 
 
+USER_CHANNELS = ("ui", "api", "mcp")
+
+
 def issue_token(subject: str, tenant_id: str, kind: str, roles: list[str] | None = None, ttl_minutes: int | None = None,
-                auth_time: int | None = None) -> str:
-    """kind: user | app. User tokens carry a jti (so one session can be revoked) and auth_time (when the person
-    actually signed in, which caps how long a session can keep refreshing)."""
+                auth_time: int | None = None, *, chan: str | None = "ui", sid: str | None = None,
+                extra: dict | None = None) -> str:
+    """kind: user | app.
+
+    User tokens carry:
+    - jti: one token can be revoked;
+    - auth_time: when the person actually signed in, which caps how long the session can keep refreshing
+      (exp is never later than auth_time + POR_SESSION_MAX_HOURS);
+    - sid: the session id, kept across refreshes and shared by tokens issued from the session (POST /v1/me/tokens),
+      so signing out ends all of them;
+    - chan: the client the token was issued for (ui for the web app's sign-in flows, mcp or api for tokens made for
+      other clients). Pass chan=None only for tokens that should behave like ones issued before channels existed.
+    """
     s = get_settings()
     now = int(time.time())
+    exp = now + 60 * (ttl_minutes or s.token_ttl_minutes)
     claims = {
         "sub": subject,
         "tid": tenant_id,
         "typ": kind,
         "roles": roles or [],
         "iat": now,
-        "exp": now + 60 * (ttl_minutes or s.token_ttl_minutes),
+        "exp": exp,
         "iss": ISSUER,
         "jti": uuid.uuid4().hex,
     }
     if kind == "user":
-        claims["auth_time"] = auth_time or now
+        at = auth_time or now
+        claims["auth_time"] = at
+        claims["exp"] = min(exp, session_expiry(at))
+        claims["sid"] = sid or uuid.uuid4().hex
+        if chan is not None:
+            if chan not in USER_CHANNELS:
+                raise ValueError(f"unknown channel {chan}")
+            claims["chan"] = chan
+    if extra:
+        claims.update(extra)
     return jwt.encode(claims, s.secret_key, algorithm="HS256")
+
+
+def session_expiry(auth_time: int) -> int:
+    """The latest moment a session that started at auth_time may last (Unix seconds)."""
+    return int(auth_time) + int(get_settings().session_max_hours * 3600)
+
+
+def oauth_fingerprint(secret_hash: str | None) -> str:
+    """Short fingerprint of a stored OAuth client secret hash. Tokens from the client credentials grant carry it, so
+    rotating the secret (or turning OAuth off) ends the tokens issued with the old one."""
+    return hashlib.sha256((secret_hash or "").encode()).hexdigest()[:16]
 
 
 def decode_token(token: str) -> dict:

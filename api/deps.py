@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from db.models import RevokedToken, SourceApp, Tenant, User, utcnow
 from db.session import new_session, set_tenant
-from services.security import constant_time_equal, decode_token, epoch, hash_secret
+from services.security import constant_time_equal, decode_token, epoch, hash_secret, oauth_fingerprint
 
 ROLES = {"reviewer", "submitter", "oversight_lead", "auditor", "integration_owner", "admin"}
 # Admins run the platform (people, teams, workflows, integrations, evidence) but do not review.
@@ -24,10 +24,29 @@ CHANNELS = ("ui", "api", "mcp")
 
 
 def request_channel(request: Request) -> str:
-    """Which client made the call. The web app sends ui, the MCP server sends mcp, anything else is api.
-    It labels the evidence; it is not a security boundary (telemetry is what measures reading)."""
-    ch = (request.headers.get("x-por-channel") or "api").lower()
-    return ch if ch in CHANNELS else "api"
+    """Which client made the call: ui (the web app), mcp (the MCP server) or api (anything else).
+
+    For people, the sign-in token decides. Tokens from the web app's sign-in flows carry chan=ui; tokens made for
+    other clients (POST /v1/me/tokens, or POST /v1/auth/oidc with a raw ID token) carry chan=mcp or chan=api and
+    always report that channel, whatever X-PoR-Channel says, so they can never pass as the review workspace.
+    A ui token reports the X-PoR-Channel header (the web app sends ui, the MCP server mcp), defaulting to api.
+    Tokens issued before channels existed (no chan claim) count as api, and may only lower themselves to mcp.
+    Source apps report the header (defaulting to api)."""
+    header = (request.headers.get("x-por-channel") or "").strip().lower()
+    claims = getattr(request.state, "token_claims", None)
+    if not claims or claims.get("typ") != "user":
+        return header if header in CHANNELS else "api"
+    chan = claims.get("chan")
+    if chan in ("api", "mcp"):
+        return chan
+    if chan == "ui":
+        return header if header in CHANNELS else "api"
+    return header if header in ("api", "mcp") else "api"
+
+
+def session_revocation_id(sid: str) -> str:
+    """RevokedToken.jti for a whole revoked session."""
+    return f"sid:{sid}"
 
 
 def effective_roles(roles: list[str] | None) -> set[str]:
@@ -94,6 +113,13 @@ def require_app(
             raise HTTPException(401, "invalid token") from None
         if claims.get("typ") == "app":
             app = db.get(SourceApp, claims["sub"])
+            # Tokens from the OAuth client credentials grant are bound to the client id and secret they were issued
+            # for: turning OAuth off or rotating the secret ends them. (Connector tokens carry no such binding.)
+            if app is not None and "oauth_client" in claims and not (
+                    app.oauth_client_id and app.oauth_client_secret_hash
+                    and constant_time_equal(app.oauth_client_id, str(claims["oauth_client"]))
+                    and constant_time_equal(oauth_fingerprint(app.oauth_client_secret_hash), str(claims.get("oauth_fp", "")))):
+                app = None
     if app is None or not app.active:
         raise HTTPException(401, "invalid credentials")
     tenant = db.get(Tenant, app.tenant_id)
@@ -143,6 +169,9 @@ def current_user(
     if user.sessions_revoked_at and iat < epoch(user.sessions_revoked_at):
         raise HTTPException(401, "session ended; sign in again")
     if claims.get("jti") and db.get(RevokedToken, claims["jti"]) is not None:
+        raise HTTPException(401, "session ended; sign in again")
+    # Signing out ends the whole session: every token refreshed or issued from it carries the same sid.
+    if claims.get("sid") and db.get(RevokedToken, session_revocation_id(claims["sid"])) is not None:
         raise HTTPException(401, "session ended; sign in again")
     set_tenant(db, user.tenant_id)
     request.state.tenant_id = user.tenant_id

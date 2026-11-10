@@ -20,6 +20,8 @@ const OPEN = new Set(["received", "processing", "in_review", "spot_check"]);
 // Finished with a request to change the work: the submitter can send a revision.
 const REVISABLE = new Set(["changes_requested", "rejected"]);
 const LIMIT = 25;
+// The portal list's ?status= filter (one exact submission status).
+const STATUSES = ["received", "processing", "in_review", "spot_check", "approved", "rejected", "changes_requested", "deferred", "cancelled"];
 const REFRESH_MS = 15000;
 
 function isVisible() {
@@ -31,8 +33,9 @@ export default function MySubmissions() {
   const [params] = useSearchParams();
   const fresh = params.get("new");
   const [offset, setOffset] = useState(0);
+  const [status, setStatus] = useState("");
   const { data, error, loading, reload } = useLoad(
-    () => apiPage<Sub>(`/v1/portal/submissions${qs({ offset, limit: LIMIT })}`), [offset]);
+    () => apiPage<Sub>(`/v1/portal/submissions${qs({ status, offset, limit: LIMIT })}`), [status, offset]);
   const [open, setOpen] = useState<string | null>(fresh);
   const [err, setErr] = useState<unknown>(null);
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
@@ -94,6 +97,11 @@ export default function MySubmissions() {
           <div className="sub">Work you've sent for review, with the decision and evidence once it's released.</div>
         </div>
         <div className="btn-row">
+          <select aria-label="Filter by status" value={status} style={{ width: 190 }}
+            onChange={(e) => { setStatus(e.target.value); setOffset(0); setOpen(null); }}>
+            <option value="">All statuses</option>
+            {STATUSES.map((st) => <option key={st} value={st}>{label(st)}</option>)}
+          </select>
           <button className="btn" onClick={reload} disabled={loading}>{loading && data ? "Refreshing…" : "Refresh"}</button>
           <Link className="btn primary" to="/submit">Submit for review</Link>
         </div>
@@ -106,7 +114,7 @@ export default function MySubmissions() {
       )}
       <ErrorBox error={error || err} />
       <div className="card" style={{ padding: 0, overflowX: "auto" }}>
-        {!data ? <Empty>{error ? "Couldn't load your submissions." : "Loading…"}</Empty> : !items.length ? <Empty>{offset ? "No more submissions." : "Nothing submitted yet."}</Empty> : (
+        {!data ? <Empty>{error ? "Couldn't load your submissions." : "Loading…"}</Empty> : !items.length ? <Empty>{offset ? "No more submissions." : status ? `No submissions are ${label(status)}.` : "Nothing submitted yet."}</Empty> : (
           <table>
             <thead><tr><th>Item</th><th>Status</th><th>Decision</th><th>Submitted</th><th /></tr></thead>
             <tbody>

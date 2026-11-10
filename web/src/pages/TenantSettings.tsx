@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api } from "../api";
+import { api, ApiError } from "../api";
 import { Badge, ROLE_INFO, useLoad } from "../components/ui";
 import { Confirm, CopyField, Err, Ok, Section, useAction } from "../components/admin/common";
 import "./admin.css";
@@ -8,6 +8,9 @@ type Price = { input: number; output: number; cache_read?: number | null; cache_
 type Sso = {
   enabled: boolean; issuer: string; client_id: string; client_secret?: string; domains: string[];
   auto_provision_roles: string[]; scopes?: string; authorization_endpoint?: string; token_endpoint?: string; jwks_uri?: string;
+  // Require this provider for everyone in the organisation (the platform-wide provider can't sign them in).
+  // NOTE: field name must match the backend SsoIn model.
+  enforce?: boolean;
 };
 type Settings = {
   id: string; name: string; region: string; active: boolean; allow_admin_reviewers: boolean; retention_days: number | null;
@@ -112,14 +115,28 @@ function General({ t, onSaved }: SectionProps) {
 
 // --- Reviewing ----------------------------------------------------------------------------------------------
 
+// People named in an error's detail (e.g. the 422 listing users who hold both admin and reviewer), if any.
+function namedPeople(e: unknown): string[] {
+  if (!(e instanceof ApiError) || !e.detail || typeof e.detail !== "object" || Array.isArray(e.detail)) return [];
+  for (const v of Object.values(e.detail as Record<string, unknown>)) {
+    if (!Array.isArray(v) || !v.length) continue;
+    const names = v.map((x: any) => (typeof x === "string" ? x : x && typeof x === "object" ? (x.name ? `${x.name} (${x.email ?? x.id ?? ""})`.replace(" ()", "") : x.email ?? x.id) : null))
+      .filter((x): x is string => !!x);
+    if (names.length) return names;
+  }
+  return [];
+}
+
 function Reviewing({ t, onSaved }: SectionProps) {
   const [allow, setAllow] = useState(t.allow_admin_reviewers);
   const a = useAction();
   async function save(e: React.FormEvent) {
     e.preventDefault();
-    const r = await a.run("save", () => put({ allow_admin_reviewers: allow }), allow ? "Admins can now also be given the reviewer role." : "Admins and reviewers are kept separate.");
+    const r = await a.run("save", () => put({ allow_admin_reviewers: allow }),
+      allow ? "Saved. On the Users page, an admin can now also be given review work with \"Also a reviewer\"." : "Admins and reviewers are kept separate.");
     if (r) { onSaved(r); setAllow(r.allow_admin_reviewers); }
   }
+  const blocked = namedPeople(a.error);
   return (
     <Section id="reviewing" title="Reviewing" intro={
       <>
@@ -137,8 +154,14 @@ function Reviewing({ t, onSaved }: SectionProps) {
           Allow people to have both the admin and reviewer roles
         </label>
         {allow && !t.allow_admin_reviewers && <div className="notice">Turning this on weakens separation of duties. It is recorded in the audit log.</div>}
-        {!allow && t.allow_admin_reviewers && <div className="notice">People who already have both roles keep them until you change their roles on the Users page.</div>}
+        {!allow && t.allow_admin_reviewers && <div className="notice">If anyone has both roles, this can't be turned off until you remove the admin or reviewer role from them on the Users page.</div>}
         <SaveRow a={a} disabled={allow === t.allow_admin_reviewers} dirty={allow !== t.allow_admin_reviewers} />
+        {blocked.length > 0 && (
+          <div className="notice">
+            Still both admin and reviewer:
+            <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>{blocked.map((n) => <li key={n}>{n}</li>)}</ul>
+          </div>
+        )}
       </form>
     </Section>
   );
@@ -435,6 +458,7 @@ function ssoForm(s: Sso | null) {
     issuer: s?.issuer ?? "", client_id: s?.client_id ?? "", client_secret: "",
     domains: (s?.domains ?? []).join(", "), roles: s?.auto_provision_roles ?? [], scopes: s?.scopes ?? "",
     authorization_endpoint: s?.authorization_endpoint ?? "", token_endpoint: s?.token_endpoint ?? "", jwks_uri: s?.jwks_uri ?? "",
+    enforce: !!s?.enforce,
   };
 }
 
@@ -472,6 +496,7 @@ function SingleSignOn({ t, onSaved }: SectionProps) {
       client_secret: f.client_secret.trim() || "***", domains, auto_provision_roles: f.roles,
       scopes: f.scopes.trim() || null, authorization_endpoint: f.authorization_endpoint.trim() || null,
       token_endpoint: f.token_endpoint.trim() || null, jwks_uri: f.jwks_uri.trim() || null,
+      enforce: f.enforce,
     };
     const r = await a.run("save", () => put({ sso }), f.enabled ? "Single sign-on saved and switched on." : "Single sign-on saved (switched off).");
     if (r) { onSaved(r); setF(ssoForm(r.sso)); setTouched(false); }
@@ -506,6 +531,14 @@ function SingleSignOn({ t, onSaved }: SectionProps) {
             Single sign-on is on
           </label>
           {!f.enabled && <div className="sub hint">Off keeps the settings but sends nobody to the provider; people sign in with a password.</div>}
+          <label className="check">
+            <input type="checkbox" checked={f.enforce} onChange={(e) => set({ enforce: e.target.checked })} />
+            Require this provider for everyone in the organisation
+          </label>
+          <div className="sub hint">
+            When ticked, the platform's own sign-in provider can't sign in people from this organisation: their single
+            sign-on goes only through the provider set up here.
+          </div>
           <div className="field-row">
             <div>
               <label htmlFor="sso-issuer">Issuer URL *</label>

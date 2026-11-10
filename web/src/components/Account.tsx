@@ -3,7 +3,51 @@ import { useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { useAuth, type Me } from "../auth";
 import ChangePassword from "./ChangePassword";
+import { CopyField } from "./admin/common";
 import { ErrorBox, Modal, RoleBadge } from "./ui";
+import "../pages/admin.css";
+
+type Minted = { access_token: string; token_type: string; expires_in: number; channel: string };
+
+// A token for reviewing through the MCP server (reviewer mode), bound to the "mcp" channel. Shown once.
+function McpToken() {
+  const [token, setToken] = useState<{ value: string; expires: Date } | null>(null);
+  const [err, setErr] = useState<unknown>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function create() {
+    setBusy(true);
+    setErr(null);
+    try {
+      const r = await api<Minted>("/v1/me/tokens", { body: { channel: "mcp" } });
+      setToken({ value: r.access_token, expires: new Date(Date.now() + r.expires_in * 1000) });
+    } catch (e) {
+      setErr(e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section aria-labelledby="mcp-token-title" className="admin-page">
+      <h3 id="mcp-token-title" style={{ margin: "0 0 4px" }}>Reviewer access token (MCP)</h3>
+      <p className="sub" style={{ fontSize: 13, margin: "0 0 8px" }}>
+        For reviewing from an AI assistant through the Proof of Review MCP server: set it as <code>POR_MCP_REVIEWER_TOKEN</code>.
+        Decisions made with it are recorded as coming from MCP. It is shown only once; "Sign out everywhere" revokes it.
+      </p>
+      {token ? (
+        <>
+          <CopyField label="Your token" value={token.value}
+            hint={<>Expires {token.expires.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}. Copy it now: it won't be shown again.</>} />
+          <button type="button" className="btn small" style={{ marginTop: 8 }} onClick={() => setToken(null)}>Done</button>
+        </>
+      ) : (
+        <button type="button" className="btn small" disabled={busy} onClick={create}>{busy ? "Creating…" : "Create token"}</button>
+      )}
+      <ErrorBox error={err} />
+    </section>
+  );
+}
 
 // Your account: name, email notifications, password, and signing out (this session or everywhere).
 export default function Account({ onClose }: { onClose: () => void }) {
@@ -73,6 +117,12 @@ export default function Account({ onClose }: { onClose: () => void }) {
           </button>
         </div>
       </form>
+      {me.roles.includes("reviewer") && (
+        <>
+          <hr style={{ border: "none", borderTop: "1px solid var(--border)", margin: "18px 0" }} />
+          <McpToken />
+        </>
+      )}
       <hr style={{ border: "none", borderTop: "1px solid var(--border)", margin: "18px 0" }} />
       <div className="btn-row" style={{ justifyContent: "space-between" }}>
         <button className="btn" onClick={out}>Sign out</button>

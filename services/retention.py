@@ -3,7 +3,8 @@
 Purging a submission removes the client content: stored files (originals and references), extracted text,
 claim text in risk flags, canary text, comment text and reading telemetry. It keeps what proves the review
 happened: decisions and their reasons, assurance scores, the audit log and the evidence pack. Only finished
-submissions (approved, rejected, changes requested, deferred, cancelled) can be purged.
+submissions (approved, rejected, changes requested, deferred, cancelled) can be purged. A purged deferred item can
+no longer be retried (workflow.retry refuses it and the oversight list stops offering it).
 
 Each tenant sets settings.retention_days (minimum 30; unset means keep forever). The scheduler purges finished
 submissions older than that (by their release date, or last update for ones never released).
@@ -78,6 +79,9 @@ def purge_submission(session: Session, sub: Submission, actor: str, reason: str)
             cm.suggested_text = None
         session.execute(delete(TelemetryEvent).where(TelemetryEvent.review_task_id.in_(task_ids)))
     sub.purged_at = utcnow()
+    # Nothing left to process or review: no scheduled processing retry, and workflow.retry refuses a purged item.
+    sub.retry_at = None
+    sub.hold_reason = None
     audit.record(session, sub.tenant_id, actor, "submission.content_purged", "submission", sub.id,
                  {"reason": reason, "files_deleted": files})
     return {"files": files, "already_purged": False}

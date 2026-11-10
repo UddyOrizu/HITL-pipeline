@@ -9,6 +9,15 @@ type Chain = { valid: boolean; count: number; broken_at: number | null; head?: s
 const LIMIT = 25;
 const STATUSES = ["received", "processing", "in_review", "spot_check", "approved", "rejected", "changes_requested", "deferred", "cancelled"];
 
+// Evidence record spot_check: {sampled, pending, agreement, spot_check_outcome}. A sampled spot-check not yet decided
+// is pending (agreement null), which is neither an agreement nor a disagreement.
+function spotCheckText(sc: { sampled?: boolean; pending?: boolean; agreement?: boolean | null; spot_check_outcome?: string | null } | null | undefined) {
+  if (!sc?.sampled) return "not sampled";
+  if (sc.pending || sc.agreement == null) return "pending";
+  const outcome = sc.spot_check_outcome ? ` (second review: ${label(sc.spot_check_outcome)})` : "";
+  return (sc.agreement ? "agreed" : "disagreed") + outcome;
+}
+
 function Record({ id }: { id: string }) {
   const { data: r, error } = useLoad(() => api<any>(`/v1/audit/submissions/${id}/evidence`), [id]);
   if (error) return <ErrorBox error={error} />;
@@ -22,7 +31,7 @@ function Record({ id }: { id: string }) {
           <span className="k">Assurance score</span><span>{r.assurance?.score ?? "–"}{r.assurance?.below_threshold ? " (below threshold)" : ""}</span>
           <span className="k">Workflow</span><span>{r.workflow.name} v{r.workflow.version}</span>
           <span className="k">Canary</span><span>{r.canary.present ? r.canary.items.map((c: any) => `${c.difficulty} ${label(c.type)}: ${c.caught ? "caught" : "missed"}`).join(", ") : "none"}</span>
-          <span className="k">Spot-check</span><span>{r.spot_check.sampled ? (r.spot_check.agreement ? "agreed" : "disagreed") : "not sampled"}</span>
+          <span className="k">Spot-check</span><span>{spotCheckText(r.spot_check)}</span>
           <span className="k">Audit chain</span><span>{r.audit_chain.valid ? `valid (${r.audit_chain.events_in_tenant_chain} events)` : "BROKEN"}</span>
         </div>
         <h3 style={{ marginTop: 14 }}>Content hashes</h3>

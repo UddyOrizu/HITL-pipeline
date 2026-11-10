@@ -1,5 +1,5 @@
 import { useSearchParams } from "react-router-dom";
-import { api } from "../api";
+import { apiAll } from "../api";
 import { useLoad } from "../components/ui";
 import { SourceApps } from "../components/integrations/SourceApps";
 import { Connectors } from "../components/integrations/Connectors";
@@ -19,7 +19,7 @@ export default function Integrations() {
   const [params, setParams] = useSearchParams();
   const tab: Tab = (TABS.find((t) => t.key === params.get("tab"))?.key ?? "apps") as Tab;
   // Apps are shared by every tab (names for connectors and deliveries, filters).
-  const apps = useLoad(() => api<SourceApp[]>("/v1/integrations/apps"));
+  const apps = useLoad(() => apiAll<SourceApp>("/v1/integrations/apps"));
 
   return (
     <div className="admin-page">

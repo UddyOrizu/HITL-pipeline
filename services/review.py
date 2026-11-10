@@ -87,10 +87,20 @@ def queue(session: Session, user: User, kind: str | None = None) -> list[dict]:
     return out
 
 
-def history(session: Session, user: User, limit: int = 50) -> list[dict]:
+def history_count(session: Session, user: User) -> int:
+    from sqlalchemy import func
+
+    return session.scalar(
+        select(func.count()).select_from(Decision).join(ReviewTask, ReviewTask.id == Decision.review_task_id)
+        .where(ReviewTask.reviewer_id == user.id, ReviewTask.tenant_id == user.tenant_id)
+    ) or 0
+
+
+def history(session: Session, user: User, limit: int = 50, offset: int = 0) -> list[dict]:
     rows = session.execute(
         select(ReviewTask, Decision).join(Decision, Decision.review_task_id == ReviewTask.id)
-        .where(ReviewTask.reviewer_id == user.id).order_by(Decision.decided_at.desc()).limit(limit)
+        .where(ReviewTask.reviewer_id == user.id, ReviewTask.tenant_id == user.tenant_id)
+        .order_by(Decision.decided_at.desc(), Decision.id).offset(offset).limit(limit)
     ).all()
     out = []
     for t, d in rows:
@@ -117,13 +127,15 @@ def task_view(session: Session, user: User, task_id: str) -> dict:
         s["spans"].append({"id": sp.id, "kind": sp.kind, "text": sp.text, "location": sp.location})
 
     acks = {a.risk_flag_id: a for a in session.scalars(select(FlagAcknowledgement).where(FlagAcknowledgement.review_task_id == task.id)).all()}
+    position = {sp.id: i for i, (_, sp) in enumerate(pairs)}
     flags = [
         {"id": f.id, "span_id": f.span_id, "category": f.category, "severity": f.severity, "rationale": f.rationale,
          "mandatory": f.mandatory, "opened": bool(acks.get(f.id) and acks[f.id].opened_at),
          "acknowledged": bool(acks.get(f.id) and acks[f.id].acknowledged_at)}
-        for f in session.scalars(select(RiskFlag).where(RiskFlag.submission_id == sub.id)).all()
+        for f in sorted(session.scalars(select(RiskFlag).where(RiskFlag.submission_id == sub.id)).all(),
+                        key=lambda f: (position.get(f.span_id, 0), f.category))
         if f.span_id in visible_ids
-    ]
+    ]  # in document order, so a canary span's flags (added after the others) do not stand out by position
     comments = [
         {"id": c.id, "span_id": c.span_id, "kind": c.kind, "body": c.body, "suggested_text": c.suggested_text,
          "created_at": c.created_at.isoformat() + "Z"}
@@ -304,6 +316,11 @@ def submit_decision(session: Session, user: User, task_id: str, outcome: str, re
             raise ReviewError("approval is below the minimum review standard; confirm to continue", "confirm_required",
                               {"reasons": reasons})
         warnings = reasons
+        if reasons:
+            # "confirmed": the reviewer saw the warning and approved anyway. "flagged": the workflow's "flag"
+            # action let the approval through, marked; the workflow then always samples it for a spot-check
+            # (when spot-checks are on) and reports count it as a flagged warning.
+            summary["review_standard"] = "flagged" if action == "flag" else "confirmed"
 
     # Canary scoring (deterministic) and the canary-only catch path.
     scored = canary.score(session, task, outcome, cited)

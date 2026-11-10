@@ -1,13 +1,14 @@
 """Connectors: adapters on top of the public API.
 
 register() wires event-driven connectors (Teams, Jira, Azure DevOps) to domain events. poll_one() runs a polling
-connector (SharePoint folders, Jira and Azure DevOps queries) once; the scheduler calls it for each active
-configuration separately, so one broken configuration never stops the others.
+connector (SharePoint folders, Jira and Azure DevOps queries) once, under a per-connector lock; the scheduler runs
+each active configuration separately, so one broken or slow configuration never stops or delays the others.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 
 from db.models import ConnectorConfig, utcnow
 from db.session import session_scope
@@ -60,41 +61,85 @@ def polls(cfg: ConnectorConfig) -> bool:
     return spec["polls"] is True or bool((cfg.config or {}).get(spec["polls"]))
 
 
-def run(session, cfg: ConnectorConfig) -> dict:
+def steps(cfg: ConnectorConfig) -> list[tuple[str, Callable]]:
+    """The polling steps of a connector, each run and committed on its own: a failing decision write-back must
+    not roll back the submissions the poll step just made (they would be submitted again on the next run)."""
     kind = kind_of(cfg)
     if kind == "sharepoint":
         from connectors import sharepoint
 
-        return sharepoint.run_once(session, cfg)
+        return [("poll", sharepoint.poll_step), ("sync", sharepoint.sync_step)]
     if kind == "jira":
         from connectors import jira
 
-        return jira.run_once(session, cfg)
+        return [("poll", jira.run_once)]
     if kind == "azure_devops":
         from connectors import azure_devops
 
-        return azure_devops.run_once(session, cfg)
-    return {}
+        return [("poll", azure_devops.run_once)]
+    return []
 
 
-def poll_one(connector_id: str, force: bool = False) -> dict:
-    """Run one connector's polling step and record the outcome on the configuration."""
+def run(session, cfg: ConnectorConfig) -> dict:
+    """All steps in one session (kept for callers that manage their own transaction)."""
+    result: dict = {}
+    for _, step in steps(cfg):
+        result.update(step(session, cfg))
+    return result
+
+
+def lock_name(connector_id: str) -> str:
+    return f"connector:{connector_id}"
+
+
+LOCK_TTL = 300  # renewed while the connector runs
+
+
+def poll_one(connector_id: str, force: bool = False, lock: bool = True) -> dict:
+    """Run one connector's polling steps under its own lock and record the outcome on the configuration.
+
+    Returns {"skipped": True, "busy": True} when the connector is already running here or on another replica.
+    lock=False: the caller already holds the connector's lock (the scheduler does)."""
     with session_scope() as s:
         cfg = s.get(ConnectorConfig, connector_id)
         if cfg is None or not cfg.active or (not force and not polls(cfg)):
             return {"skipped": True}
         tenant_id = cfg.tenant_id
+    if not lock:
+        return _run_steps(connector_id, tenant_id)
+    from services import scheduler
+
+    release = scheduler.acquire(lock_name(connector_id), LOCK_TTL, renew=True)
+    if release is None:
+        return {"skipped": True, "busy": True}
     try:
-        with session_scope(tenant_id) as s:
-            cfg = s.get(ConnectorConfig, connector_id)
-            result = run(s, cfg)
-            cfg.last_run_at = utcnow()
-            cfg.last_error = None
-        return result
-    except Exception as exc:  # noqa: BLE001
-        log.exception("connector %s failed", connector_id)
-        with session_scope(tenant_id) as s:
-            cfg = s.get(ConnectorConfig, connector_id)
-            cfg.last_run_at = utcnow()
-            cfg.last_error = f"{type(exc).__name__}: {exc}"[:2000]
-        return {"error": f"{type(exc).__name__}: {exc}"[:500]}
+        return _run_steps(connector_id, tenant_id)
+    finally:
+        release()
+
+
+def _run_steps(connector_id: str, tenant_id: str) -> dict:
+    result: dict = {}
+    errors: list[str] = []
+    with session_scope(tenant_id) as s:
+        cfg = s.get(ConnectorConfig, connector_id)
+        names = steps(cfg) if cfg is not None else []
+    for name, step in names:
+        try:
+            with session_scope(tenant_id) as s:
+                out = step(s, s.get(ConnectorConfig, connector_id)) or {}
+        except Exception as exc:  # noqa: BLE001
+            log.exception("connector %s: %s step failed", connector_id, name)
+            errors.append(f"{name}: {type(exc).__name__}: {exc}")
+            continue
+        errors += out.pop("errors", [])  # items that failed on their own (the others went through)
+        result.update(out)
+    with session_scope(tenant_id) as s:
+        cfg = s.get(ConnectorConfig, connector_id)
+        if cfg is None:  # deleted while running
+            return result
+        cfg.last_run_at = utcnow()
+        cfg.last_error = "; ".join(errors)[:2000] or None
+    if errors:
+        result["error"] = "; ".join(errors)[:500]
+    return result

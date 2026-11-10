@@ -19,7 +19,7 @@ COPY db ./db
 COPY prompts ./prompts
 COPY scripts ./scripts
 COPY alembic.ini ./
-# EXTRAS adds optional integrations, e.g. --build-arg EXTRAS=all,azure,observability for Azure with Sentry.
+# EXTRAS adds optional integrations, e.g. --build-arg EXTRAS=full for Azure (Blob Storage, managed identity) with Sentry.
 ARG EXTRAS=all
 RUN pip install --no-cache-dir ".[${EXTRAS}]"
 COPY --from=web /web/dist ./web/dist

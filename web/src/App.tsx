@@ -25,13 +25,14 @@ import MySubmissions from "./pages/MySubmissions";
 import { RoleBadge } from "./components/ui";
 
 function Shell() {
-  const { me, loading, has } = useAuth();
+  const { me, loading, has, signedOut } = useAuth();
   const location = useLocation();
   const [account, setAccount] = useState(false);
   if (loading) return <div className="empty">Loading…</div>;
   if (!me) {
-    // Come back here after signing in (deep links, expired sessions).
-    if (location.pathname !== "/") rememberReturn(location.pathname + location.search);
+    // Come back here after signing in (deep links, expired sessions), but not after a deliberate sign-out:
+    // the next person to sign in on this browser shouldn't land on the previous person's page.
+    if (location.pathname !== "/" && !signedOut) rememberReturn(location.pathname + location.search);
     return <Navigate to="/login" replace />;
   }
   const isAdmin = me.roles.includes("admin");

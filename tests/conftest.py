@@ -173,7 +173,9 @@ def read_fully(client, token: str, task_id: str, view: dict, seconds: int = 50) 
         events.append({"type": "section_in_view", "section_id": s["id"], "value": 4,
                        "client_ts": (start + timedelta(seconds=min(seconds - 1, j * 2 + 1))).isoformat()})
     events.append({"type": "scroll_depth", "value": 1.0, "client_ts": now.isoformat()})
-    r = client.post("/v1/telemetry", json={"task_id": task_id, "events": events}, headers=auth(token))
+    # Reading telemetry is only accepted from the web workspace.
+    r = client.post("/v1/telemetry", json={"task_id": task_id, "events": events},
+                    headers={**auth(token), "X-PoR-Channel": "ui"})
     assert r.status_code == 202, r.text
 
 

@@ -358,10 +358,13 @@ class Services:
         self.calls.append((request.method, url, request.content))
         if "/_apis/wit/wiql" in url:
             return httpx.Response(200, json={"workItems": [{"id": 42}]})
+        item = {"id": 42, "rev": 3, "fields": {
+            "System.Title": "Client letter", "System.Rev": 3,
+            "System.Description": "<p>Dear client,</p><p>Your premium is &pound;420 a year.</p>"}}
+        if "/_apis/wit/workitems?" in url and request.method == "GET":  # batch fetch of the WIQL results
+            return httpx.Response(200, json={"count": 1, "value": [item]})
         if "/_apis/wit/workitems/42" in url and request.method == "GET":
-            return httpx.Response(200, json={"id": 42, "rev": 3, "fields": {
-                "System.Title": "Client letter", "System.Rev": 3,
-                "System.Description": "<p>Dear client,</p><p>Your premium is &pound;420 a year.</p>"}})
+            return httpx.Response(200, json=item)
         if "/_apis/wit/attachments" in url:
             return httpx.Response(201, json={"id": "att-1", "url": "https://dev.azure.com/org/_apis/wit/attachments/att-1"})
         if "/rest/api/3/search/jql" in url:

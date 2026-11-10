@@ -90,21 +90,30 @@ def test_llm_path_goes_through_gateway_and_agents(client, monkeypatch):
 
 
 def test_llm_failure_falls_back_to_heuristic(client, monkeypatch):
+    """An answer that does not match the schema falls back to the heuristics (a provider outage is retried
+    instead: see tests/test_fix_pipeline_model.py)."""
     from services import model_gateway
 
     gw = model_gateway.ModelGateway("anthropic", "claude-sonnet-5-5")
 
-    class Boom:
+    class Garbled:
         def run(self, *_):
-            raise RuntimeError("provider down")
+            return type("Run", (), {"content": "this is not json", "status": "COMPLETED", "metrics": None})()
 
-    monkeypatch.setattr("agents.claim_extractor.build", lambda g: Boom())
+    monkeypatch.setattr("agents.claim_extractor.build", lambda g: Garbled())
     model_gateway.set_gateway(gw)
     world = make_tenant()
     sub = submit_text(client, world)
     _, _, _, view = open_task(client, world, sub["id"])
     assert view["flags"]
-    assert gw.calls and gw.calls[0].ok is False and gw.calls[0].agent == "claim_extractor"
+    from db.models import AuditEvent, ModelCall
+    from db.session import session_scope
+
+    with session_scope() as db:
+        calls = db.scalars(select(ModelCall).where(ModelCall.submission_id == sub["id"])).all()
+        assert calls and calls[0].ok is False and calls[0].agent == "claim_extractor"
+        fb = db.scalars(select(AuditEvent).where(AuditEvent.action == "model.fallback")).first()
+        assert fb is not None and fb.payload["agent"] == "claim_extractor"
 
 
 def test_no_provider_sdk_calls_outside_the_gateway():

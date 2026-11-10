@@ -112,7 +112,7 @@ def test_evidence_pack_contents(client, sink):
     assert ev["risk_flags"] and all("opened" in f for f in ev["risk_flags"])
     assert ev["canary"]["present"] is True and ev["canary"]["items"][0]["caught"] is False
     assert "injected_text" not in str(ev) and "canary_text" not in str(ev)
-    assert ev["spot_check"] == {"sampled": True, "agreement": True, "spot_check_outcome": "approve"}
+    assert ev["spot_check"] == {"sampled": True, "pending": False, "agreement": True, "spot_check_outcome": "approve"}
     assert ev["assurance"]["score"] > 0
     assert ev["audit_chain"]["valid"] is True
     actions = [e["action"] for e in ev["audit_trail"]]

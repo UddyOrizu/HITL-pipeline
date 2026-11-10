@@ -47,6 +47,15 @@ def default_reviewer_client() -> httpx.AsyncClient:
 _factory: ClientFactory = default_client
 _reviewer_factory: ClientFactory = default_reviewer_client
 
+# Reading file_path from this machine's disk only makes sense when the MCP client runs on the same machine
+# (stdio). A hosted (--http) server turns it off, so a remote caller cannot read the server's own files.
+_allow_file_paths = True
+
+
+def set_allow_file_paths(allowed: bool) -> None:
+    global _allow_file_paths
+    _allow_file_paths = allowed
+
 
 def set_client_factory(factory: ClientFactory) -> None:
     global _factory
@@ -122,6 +131,9 @@ async def submit_for_review(
     if content is not None:
         body["text"] = content
     elif file_path is not None:
+        if not _allow_file_paths:
+            raise ToolFailure("file_path is not available on a hosted (HTTP) MCP server: send the file as "
+                              "file_base64 with filename, or the text as content")
         path = Path(file_path).expanduser()
         if not path.is_file():
             raise ToolFailure(f"file not found: {file_path}")

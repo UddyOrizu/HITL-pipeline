@@ -1,7 +1,8 @@
 """Reports and cost breakdown. Add ?format=csv to any report for a spreadsheet-friendly export.
 
 - Overview (oversight leads, auditors): throughput, turnaround, outcomes, SLAs, scores, by workflow / source /
-  risk tier / origin / channel, with a time series.
+  risk tier / origin / channel, with a time series. The CSV is long-format: a "section" column (kpi, series,
+  by_workflow, by_source_app, by_risk_tier, by_origin, by_channel, held_by_reason) tags each row.
 - Reviewers (oversight leads): per-reviewer workload and review quality.
 - SLA (oversight leads): tasks overdue now.
 - Costs (oversight leads; admins): model spend and reviewer time, grouped by source app, workflow, team, reviewer,
@@ -66,7 +67,8 @@ def overview(
     start, end = _range(from_, to)
     data = reports.overview(db, p.tenant_id, start, end, interval, workflow_id, source_app_id)
     if format == "csv":
-        return _csv(costs.to_csv(data["series"], reports.SERIES_COLUMNS), f"overview-{from_ or start.date()}-{to or ''}")
+        return _csv(costs.to_csv(reports.overview_csv_rows(data), reports.OVERVIEW_COLUMNS),
+                    f"overview-{from_ or start.date()}-{to or ''}")
     return data
 
 
@@ -84,8 +86,12 @@ def reviewer_report(
 
 
 @router.get("/sla")
-def sla_report(p: UserPrincipal = Depends(leads), db: Session = Depends(get_db)):
-    return reports.sla(db, p.tenant_id)
+def sla_report(format: str = Query("json", pattern="^(json|csv)$"), p: UserPrincipal = Depends(leads),
+               db: Session = Depends(get_db)):
+    data = reports.sla(db, p.tenant_id)
+    if format == "csv":
+        return _csv(costs.to_csv(data["overdue"], reports.SLA_COLUMNS), f"sla-overdue-{utcnow().date()}")
+    return data
 
 
 @router.get("/costs")

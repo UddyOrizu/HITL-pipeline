@@ -27,7 +27,7 @@ from api.routers import (
     users,
 )
 from services import bootstrap, metrics, scheduler
-from services.config import get_settings
+from services.config import DEFAULT_SECRET_KEY, get_settings
 from services.logging_setup import configure as configure_logging
 from services.logging_setup import request_id
 from services.outbound import CanaryLeakError
@@ -43,8 +43,15 @@ def check_production_settings() -> None:
     s = get_settings()
     if not s.is_prod:
         return
-    if s.secret_key.startswith("dev-only-insecure"):
-        raise RuntimeError("POR_SECRET_KEY must be set in production")
+    key = (s.secret_key or "").strip()
+    if key == DEFAULT_SECRET_KEY or key.startswith("dev-only-insecure") or len(key) < 32:
+        raise RuntimeError("POR_SECRET_KEY must be set in production to a random value of at least 32 characters")
+    if not (s.encryption_key or "").strip():
+        raise RuntimeError("POR_ENCRYPTION_KEY must be set in production (it encrypts stored connector and SSO "
+                           "secrets; without it they are encrypted with a key derived from POR_SECRET_KEY)")
+    if s.metrics_enabled and not (s.metrics_token or "").strip():
+        raise RuntimeError("POR_METRICS_TOKEN must be set in production while metrics are on (or set "
+                           "POR_METRICS_ENABLED=false)")
     if s.virus_scan_required and not s.clamav_host:
         raise RuntimeError("POR_CLAMAV_HOST must be set in production (or POR_REQUIRE_VIRUS_SCAN=false to accept "
                            "uploads without virus scanning)")
@@ -169,7 +176,7 @@ if _dist.exists():
         if path.startswith("v1/"):
             raise HTTPException(404, "not found")
         target = (_dist / path).resolve()
-        if path and target.is_file() and str(target).startswith(str(_dist)):
+        if path and target.is_relative_to(_dist) and target.is_file():
             return FileResponse(target)
         return FileResponse(_dist / "index.html")
 

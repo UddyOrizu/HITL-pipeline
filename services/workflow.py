@@ -23,8 +23,9 @@ TRANSITIONS: dict[str, set[str]] = {
     "approved": set(),
     "rejected": set(),
     "changes_requested": set(),
-    # An oversight lead can retry a deferred item: back to processing (it failed) or to review (no capacity).
-    "deferred": {"received", "in_review"},
+    # An oversight lead can retry a deferred item: back to processing (it failed there), to review (no capacity),
+    # or back to its spot-check (deferred while waiting for the second review).
+    "deferred": {"received", "in_review", "spot_check"},
     "cancelled": set(),
 }
 FINAL = {"approved", "rejected", "changes_requested", "deferred", "cancelled"}
@@ -34,7 +35,6 @@ HOLD_REASONS = {
 }
 # Holds an oversight lead settles with a decision, and holds settled by an action (assign, defer, cancel).
 DECISION_HOLDS = {"spot_check_disagreement", "below_threshold", "awaiting_spot_check_reviewer"}
-ACTION_HOLDS = {"awaiting_capacity", "awaiting_spot_check_reviewer", "release_check_failed"}
 
 _rng = random.SystemRandom()
 
@@ -135,10 +135,15 @@ def _overflow(session: Session, sub: Submission, wf: Workflow) -> None:
     return None
 
 
-def _sample_for_spot_check(session: Session, sub: Submission, wf: Workflow, reviewer_id: str) -> bool:
+def _sample_for_spot_check(session: Session, sub: Submission, wf: Workflow, reviewer_id: str,
+                           below_standard: bool = False) -> bool:
     rate = wf.spot_check_rate or 0
     if rate <= 0:
         return False
+    if below_standard:
+        # The telemetry policy's "flag" action: an approval below the reading standard always gets the blind
+        # second review when the workflow runs spot-checks.
+        return True
     if sub.risk_tier == "high":
         rate *= 2
     rate_value, n = canary.catch_rate(session, sub.tenant_id, reviewer_id)
@@ -242,9 +247,12 @@ def on_decision(session: Session, task: ReviewTask, decision: Decision) -> None:
                          {"stage": stages[sub.stage_index].get("name"), "index": sub.stage_index})
             assign_stage(session, sub)
             return
-        prelim = assurance.compute(session, sub, wf)
+        # Preliminary score only decides whether to force a second review: not stored and not audited (finalise
+        # computes and records the score once).
+        prelim = assurance.compute(session, sub, wf, persist=False)
         force = prelim.below_threshold and policy["below_action"] == "second_review"
-        if force or _sample_for_spot_check(session, sub, wf, task.reviewer_id):
+        flagged = (decision.telemetry_summary or {}).get("review_standard") == "flagged"
+        if force or _sample_for_spot_check(session, sub, wf, task.reviewer_id, below_standard=flagged):
             transition(session, sub, "spot_check", "system:workflow", forced_by_threshold=force)
             assign_spot_check(session, sub)
             return
@@ -362,11 +370,39 @@ def defer(session: Session, sub: Submission, reason: str, actor: str) -> None:
     assign_pending(session, sub.tenant_id)
 
 
-def retry(session: Session, sub: Submission, actor: str) -> str:
-    """Retry a deferred item: processing again if it failed there, otherwise back into review."""
+def _deferral_event(session: Session, sub: Submission) -> dict:
+    """Payload of the status change that deferred this item: {"from", "reason", "hold_reason", ...}."""
+    from db.models import AuditEvent
+
+    for e in session.scalars(select(AuditEvent).where(AuditEvent.tenant_id == sub.tenant_id, AuditEvent.entity_id == sub.id,
+                                                      AuditEvent.action == "submission.status_changed")
+                             .order_by(AuditEvent.seq.desc())).all():
+        if (e.payload or {}).get("to") == "deferred":
+            return e.payload
+    return {}
+
+
+def can_retry(session: Session, sub: Submission) -> tuple[bool, str]:
     if sub.status != "deferred":
-        raise TransitionError("only deferred submissions can be retried")
-    if sub.content_hash is None or sub.processing_error:
+        return False, "only deferred submissions can be retried"
+    if sub.purged_at:
+        return False, "this submission's content was purged under the retention policy; ask the source app to resubmit"
+    d = _deferral_event(session, sub)
+    if d.get("hold_reason") == "release_check_failed" or d.get("reason") == "release_check_failed":
+        return False, ("the release check failed: the stored content no longer matches what was submitted, so it "
+                       "cannot be reviewed again; ask the source app to resubmit")
+    return True, ""
+
+
+def retry(session: Session, sub: Submission, actor: str) -> str:
+    """Retry a deferred item: processing again if it failed there, back to its spot-check if it was deferred
+    waiting for the second review, otherwise back into review. Refused for purged content and for items deferred
+    after a failed release check (the stored content no longer matches, so only a resubmission is safe)."""
+    ok, why = can_retry(session, sub)
+    if not ok:
+        raise TransitionError(why)
+    deferral = _deferral_event(session, sub)
+    if sub.content_hash is None or sub.processing_error or deferral.get("from") in ("received", "processing"):
         sub.processing_attempts = 0
         sub.retry_at = None
         sub.processing_error = None
@@ -377,6 +413,10 @@ def retry(session: Session, sub: Submission, actor: str) -> str:
         sid, tid = sub.id, sub.tenant_id
         on_commit(session, lambda: jobs.enqueue("process_submission", submission_id=sid, tenant_id=tid))
         return "processing"
+    if deferral.get("from") == "spot_check":
+        transition(session, sub, "spot_check", actor, reason="retry")
+        assign_spot_check(session, sub, actor=actor)
+        return "spot_check"
     transition(session, sub, "in_review", actor, reason="retry")
     webhooks.emit(session, sub, "submission.in_review")
     assign_stage(session, sub)
@@ -414,18 +454,34 @@ def check_slas(session: Session) -> int:
 
 
 def _reassign_overdue(session: Session, sub: Submission, task: ReviewTask) -> None:
+    """Move an overdue task to someone else. The replacement is chosen first: if nobody is available the task
+    stays with its reviewer (the item is already escalated) and the failed attempt is recorded."""
     primary = task.kind == "primary" and sub.status == "in_review" and task.stage == sub.stage_index
     spot = task.kind == "spot_check" and sub.status == "spot_check"
     if not (primary or spot):
+        return
+    wf = workflow_of(session, sub)
+    if primary:
+        stage = stages_of(wf)[sub.stage_index]
+    else:
+        stage = {"name": "Spot-check", "team_id": (wf.risk_policy or {}).get("spot_check_team_id"),
+                 "sla_hours": stages_of(wf)[-1].get("sla_hours")}
+    effort = assignment.estimate_effort(assignment.word_count(session, sub), sub.risk_tier)
+    exclude = assignment.prior_reviewer_ids(session, sub.id) | {task.reviewer_id}
+    replacement = assignment.pick_reviewer(session, sub, wf, stage, effort, exclude)
+    if replacement is None:
+        audit.record(session, sub.tenant_id, "system:workflow", "task.reassign_failed", "review_task", task.id,
+                     {"submission_id": sub.id, "reviewer_id": task.reviewer_id, "reason": "sla_breached",
+                      "detail": "no other eligible reviewer under their caps; the task stays assigned"})
         return
     task.status = "cancelled"
     task.completed_at = utcnow()
     _detach_unscored_canaries(session, task)
     session.flush()
     if primary:
-        new_task = assign_stage(session, sub, extra_exclude={task.reviewer_id})
+        new_task = assign_stage(session, sub, reviewer=replacement)
     else:
-        new_task = assign_spot_check(session, sub, extra_exclude={task.reviewer_id})
+        new_task = assign_spot_check(session, sub, reviewer=replacement)
     audit.record(session, sub.tenant_id, "system:workflow", "task.reassigned", "review_task", task.id,
                  {"submission_id": sub.id, "from_reviewer_id": task.reviewer_id, "reason": "sla_breached",
                   "new_reviewer_id": new_task.reviewer_id if new_task else None})

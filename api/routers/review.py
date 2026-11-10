@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from api.deps import UserPrincipal, get_db, request_channel, require_roles
+from api.pagination import Page, set_headers
 from db.models import ReviewTask
 from services import review, telemetry
 from services.review import ReviewError
@@ -30,9 +31,13 @@ def get_queue(kind: str | None = Query(None, pattern="^(primary|spot_check)$"), 
 
 
 @router.get("/review/history")
-def get_history(p: UserPrincipal = Depends(reviewer), db: Session = Depends(get_db)):
-    """A reviewer's own decisions, telemetry and canary results: reviewers can always see their own data."""
-    return review.history(db, p.user)
+def get_history(response: Response, offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=200),
+                p: UserPrincipal = Depends(reviewer), db: Session = Depends(get_db)):
+    """A reviewer's own decisions, telemetry and canary results: reviewers can always see their own data.
+    Newest first, paged with offset and limit (X-Total-Count and X-Next-Offset headers)."""
+    rows = review.history(db, p.user, limit=limit, offset=offset)
+    set_headers(response, review.history_count(db, p.user), Page(offset=offset, limit=limit), len(rows))
+    return rows
 
 
 @router.get("/review/tasks/{task_id}")
@@ -134,8 +139,11 @@ class TelemetryIn(BaseModel):
 
 
 @router.post("/telemetry", status_code=202)
-def post_telemetry(body: TelemetryIn, p: UserPrincipal = Depends(reviewer), db: Session = Depends(get_db)):
-    """Batched reviewer events, sent by the workspace every 5 seconds."""
+def post_telemetry(body: TelemetryIn, request: Request, p: UserPrincipal = Depends(reviewer), db: Session = Depends(get_db)):
+    """Batched reviewer events, sent by the workspace every 5 seconds. Only the web workspace measures reading,
+    so telemetry from an API or MCP credential is refused (it could otherwise be made up to pass the standard)."""
+    if request_channel(request) != "ui":
+        raise HTTPException(403, "reading telemetry is only accepted from the web workspace")
     task = db.get(ReviewTask, body.task_id)
     if task is None or task.reviewer_id != p.user.id or task.tenant_id != p.tenant_id:
         raise HTTPException(404, "task not found")

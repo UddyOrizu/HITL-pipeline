@@ -4,7 +4,14 @@ Submitter mode lets AI agents call the human approval gate as a tool:
     POR_MCP_API_URL=http://localhost:8000 POR_MCP_API_KEY=por_... python -m mcp_server.server
 Reviewer mode lets a named human reviewer work their queue from an MCP client:
     POR_MCP_API_URL=http://localhost:8000 POR_MCP_REVIEWER_TOKEN=<token> python -m mcp_server.server
-Add --http to serve streamable HTTP instead of stdio.
+The reviewer token can be a channel-bound token minted for MCP (POST /v1/me/tokens with {"channel": "mcp"}), so it
+can only be used through this server and is labelled as such.
+
+Add --http to serve streamable HTTP (at /mcp) instead of stdio. A hosted server needs a bearer token of its own:
+    POR_MCP_HTTP_TOKEN=<long random string> POR_MCP_HOST=0.0.0.0 python -m mcp_server.server --http
+Every HTTP request must then send "Authorization: Bearer <POR_MCP_HTTP_TOKEN>". Without the token the server only
+starts when bound to 127.0.0.1 / localhost (local development). In --http mode file_path is turned off, so remote
+callers cannot read the server's own files: they send file_base64 with filename, or content.
 
 A server runs in one mode only. If one server held both credentials, a single agent could submit work and then
 approve it, which is exactly what a human-in-the-loop gate exists to prevent.
@@ -12,6 +19,7 @@ approve it, which is exactly what a human-in-the-loop gate exists to prevent.
 
 from __future__ import annotations
 
+import hmac
 import os
 import sys
 
@@ -40,9 +48,13 @@ def mode() -> str:
     return "reviewer" if has_token else "submitter"
 
 
-def build(which: str) -> MCPServer:
+def build(which: str, hosted: bool = False) -> MCPServer:
+    """hosted: served over HTTP, so file_path (a path on this server's disk) is turned off."""
+    tools.set_allow_file_paths(not hosted)
     srv = MCPServer(name=f"proof-of-review-{which}", instructions=REVIEWER_INSTRUCTIONS if which == "reviewer" else SUBMITTER_INSTRUCTIONS)
     for fn, description in (SUBMITTER_TOOLS if which == "submitter" else REVIEWER_TOOLS):
+        if hosted and fn is submit_for_review:
+            description = HOSTED_SUBMIT_DESCRIPTION
         srv.tool(description=description)(fn)
     return srv
 
@@ -106,6 +118,8 @@ SUBMITTER_TOOLS = [
     (wait_for_decision, "Block until the submission is decided or the timeout passes. Use before acting on approved content."),
     (get_review_feedback, "Get reviewer comments for a request-changes outcome so the content can be revised and resubmitted."),
 ]
+HOSTED_SUBMIT_DESCRIPTION = ("Submit content (text, or a base64 file with its filename) for human review. Returns a "
+                             "submission ID. file_path is not available on a hosted server.")
 REVIEWER_TOOLS = [
     (list_review_tasks, "List the reviewer's open review tasks. kind: primary or spot_check."),
     (open_review_task, "Open a task: the review copy as text with span ids, risk flags, comments and what blocks approval."),
@@ -115,13 +129,50 @@ REVIEWER_TOOLS = [
 ]
 
 
+LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+class BearerAuth:
+    """ASGI middleware: every HTTP request must carry "Authorization: Bearer <token>" (compared in constant
+    time). Lifespan events pass through so the MCP session manager still starts and stops."""
+
+    def __init__(self, app, token: str):
+        self.app = app
+        self.expected = f"Bearer {token}".encode()
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            given = dict(scope.get("headers") or []).get(b"authorization", b"")
+            if not hmac.compare_digest(given, self.expected):
+                await send({"type": "http.response.start", "status": 401,
+                            "headers": [(b"content-type", b"application/json"), (b"www-authenticate", b"Bearer")]})
+                await send({"type": "http.response.body", "body": b'{"error":"unauthorized"}'})
+                return
+        await self.app(scope, receive, send)
+
+
+def http_app(server: MCPServer, host: str, token: str | None):
+    """The streamable HTTP app (at /mcp), behind the bearer token when one is set."""
+    app = server.streamable_http_app(host=host)
+    if token:
+        return BearerAuth(app, token)
+    if host not in LOCAL_HOSTS:
+        raise SystemExit("POR_MCP_HTTP_TOKEN must be set to serve MCP over HTTP on a non-local address "
+                         f"(POR_MCP_HOST={host}). Clients then send 'Authorization: Bearer <token>'.")
+    return app
+
+
 def main() -> None:
-    server = build(mode())
-    if "--http" in sys.argv:
+    hosted = "--http" in sys.argv
+    server = build(mode(), hosted=hosted)
+    if hosted:
+        import uvicorn
+
         # POR_MCP_PORT lets the HTTP server run next to the API, which also defaults to 8000.
         # POR_MCP_HOST=0.0.0.0 in containers; the default only listens on this machine.
-        server.run("streamable-http", host=os.environ.get("POR_MCP_HOST", "127.0.0.1"),
-                   port=int(os.environ.get("POR_MCP_PORT", "8000")))
+        host = os.environ.get("POR_MCP_HOST", "127.0.0.1")
+        app = http_app(server, host, os.environ.get("POR_MCP_HTTP_TOKEN") or None)
+        uvicorn.run(app, host=host, port=int(os.environ.get("POR_MCP_PORT", "8000")))
     else:
         server.run("stdio")
 

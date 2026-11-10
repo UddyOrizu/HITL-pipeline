@@ -1,13 +1,15 @@
 """Processing pipeline for one submission: extract, flag, seed, then hand to the workflow engine.
 
-Transient failures (document conversion service or model provider unavailable, network errors) are retried
-with backoff up to POR_PROCESSING_MAX_ATTEMPTS. Permanent failures (a file that cannot be read) defer the
-submission straight away. Deferred items can be retried by an oversight lead.
+Transient failures (document conversion service or model provider unavailable, network errors, timeouts, 5xx
+answers) are retried with backoff up to POR_PROCESSING_MAX_ATTEMPTS, then the submission is deferred. Permanent
+failures (a file that cannot be read or converted, a 4xx answer, a missing stored original, a request the model
+provider refuses) defer the submission straight away. Deferred items can be retried by an oversight lead.
 """
 
 from __future__ import annotations
 
 import logging
+import subprocess
 from datetime import timedelta
 
 import httpx
@@ -19,11 +21,22 @@ from services.config import get_settings
 
 log = logging.getLogger("por.pipeline")
 
-TRANSIENT = (ingestion.ConversionUnavailable, httpx.HTTPError, ConnectionError, TimeoutError, OSError)
+TRANSIENT = (ingestion.ConversionUnavailable, ingestion.ScanUnavailable, model_gateway.ModelUnavailable,
+             subprocess.TimeoutExpired, httpx.HTTPError, ConnectionError, TimeoutError, OSError)
+PERMANENT = (ingestion.ExtractionError, ingestion.UnsupportedType, subprocess.CalledProcessError, FileNotFoundError)
+# Storage SDK errors for an object that is not there (S3, Azure): the original is gone, retrying will not help.
+MISSING_OBJECT = {"NoSuchKey", "ResourceNotFoundError", "BlobNotFound"}
 
 
 def is_transient(exc: Exception) -> bool:
-    return isinstance(exc, TRANSIENT) and not isinstance(exc, ingestion.ExtractionError | ingestion.UnsupportedType)
+    if isinstance(exc, PERMANENT) or type(exc).__name__ in MISSING_OBJECT:
+        return False
+    if isinstance(exc, model_gateway.ModelUnavailable):
+        return exc.retryable
+    if isinstance(exc, httpx.HTTPStatusError):
+        code = exc.response.status_code
+        return code >= 500 or code in (408, 429)
+    return isinstance(exc, TRANSIENT)
 
 
 def retry_delay(attempt: int) -> timedelta:

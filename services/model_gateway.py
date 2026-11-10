@@ -4,6 +4,10 @@
 - A customer-supplied endpoint can be set with POR_MODEL_BASE_URL (anthropic and openai providers).
 - Every call is logged with provider, model, agent, latency, outcome and token usage, and stored in model_calls
   (tenant and submission come from call_context) so cost reports can price it.
+- A provider outage (connection error, timeout, 429, 5xx) raises ModelUnavailable, so the pipeline retries the
+  submission with backoff instead of quietly using the heuristics. Only an unusable answer (one that does not parse
+  or match the output schema) makes run_agent return None, so the caller falls back to the heuristic engine; each
+  fallback is counted in por_model_fallbacks_total and logged.
 No provider SDK is imported anywhere else in the codebase.
 """
 
@@ -11,7 +15,9 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,6 +32,84 @@ log = logging.getLogger("por.model_gateway")
 PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
 T = TypeVar("T", bound=BaseModel)
+
+
+class ModelUnavailable(RuntimeError):
+    """The model provider could not answer. `retryable` is False for errors that fail the same way every time
+    (a rejected request or bad credentials): the submission is deferred at once instead of retried."""
+
+    def __init__(self, message: str, retryable: bool = True, status_code: int | None = None):
+        super().__init__(message)
+        self.retryable = retryable
+        self.status_code = status_code
+
+
+# Exception class names (anywhere in the cause chain) that mean the provider or the network is unavailable.
+_UNAVAILABLE_NAMES = {
+    "APIConnectionError", "APITimeoutError", "RateLimitError", "InternalServerError", "OverloadedError",
+    "ServiceUnavailableError", "ModelRateLimitError", "ConnectError", "ConnectTimeout", "ReadTimeout", "WriteTimeout",
+    "PoolTimeout", "TimeoutException", "ReadError", "WriteError", "RemoteProtocolError", "NetworkError",
+    "TransportError", "ProxyError", "TimeoutError", "ConnectionError", "ConnectionResetError",
+    "ConnectionRefusedError", "ConnectionAbortedError", "BrokenPipeError",
+}
+# Answers that fail the same way on every attempt.
+_PERMANENT_STATUS = {400, 401, 403, 404, 413, 422}
+_STATUS_RE = re.compile(r"(?:error code|status(?: code)?)[:= ]+(\d{3})", re.I)
+
+
+def _status_of(exc: BaseException) -> int | None:
+    for attr in ("status_code", "status"):
+        v = getattr(exc, attr, None)
+        if isinstance(v, int):
+            return v
+    resp = getattr(exc, "response", None)
+    v = getattr(resp, "status_code", None)
+    return v if isinstance(v, int) else None
+
+
+def _chain(exc: BaseException | None):
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        yield exc
+        exc = exc.__cause__ or exc.__context__
+
+
+def is_output_error(exc: BaseException) -> bool:
+    """The provider answered, but the answer does not parse or match the schema."""
+    from pydantic import ValidationError
+
+    return isinstance(exc, ValidationError | json.JSONDecodeError | ValueError | TypeError)
+
+
+def classify(exc: BaseException) -> ModelUnavailable:
+    """Turn a provider or transport exception into ModelUnavailable: retryable unless it is a permanent 4xx."""
+    status = None
+    for e in _chain(exc):
+        status = status or _status_of(e)
+        if type(e).__name__ in _UNAVAILABLE_NAMES or isinstance(e, TimeoutError | ConnectionError):
+            return ModelUnavailable(f"{type(e).__name__}: {e}", True, status)
+    if status is None:
+        m = _STATUS_RE.search(str(exc))
+        status = int(m.group(1)) if m else None
+    if status is not None:
+        return ModelUnavailable(f"provider returned {status}: {exc}", status not in _PERMANENT_STATUS, status)
+    # An error we cannot place: treat it as an outage (retried, then deferred) rather than hide it behind heuristics.
+    return ModelUnavailable(f"{type(exc).__name__}: {exc}", True, None)
+
+
+def _classify_message(message: str) -> ModelUnavailable:
+    """Agno reports a failed run (status ERROR, content = the error text) instead of raising."""
+    m = _STATUS_RE.search(message)
+    status = int(m.group(1)) if m else None
+    if status is not None:
+        return ModelUnavailable(f"provider returned {status}: {message[:500]}", status not in _PERMANENT_STATUS, status)
+    return ModelUnavailable(message[:500] or "model run failed", True, None)
+
+
+def _run_failed(result) -> bool:
+    status = getattr(result, "status", None)
+    return status is not None and str(getattr(status, "value", status)).lower() == "error"
 
 _context: contextvars.ContextVar[tuple[str | None, str | None, list | None]] = contextvars.ContextVar(
     "por_model_ctx", default=(None, None, None))
@@ -94,7 +178,6 @@ class ModelGateway:
     model_id: str
     api_key: str | None = None
     base_url: str | None = None
-    calls: list[CallRecord] = field(default_factory=list)
 
     @property
     def enabled(self) -> bool:
@@ -123,28 +206,41 @@ class ModelGateway:
         raise RuntimeError(f"provider '{self.provider}' has no model")
 
     def run_agent(self, agent, agent_name: str, user_input: str, output_schema: type[T]) -> T | None:
-        """Run an Agno agent built with this gateway's model. Returns None on failure so callers can fall back."""
+        """Run an Agno agent built with this gateway's model.
+
+        Raises ModelUnavailable when the provider cannot answer (outage, timeout, rate limit, 5xx, or a request it
+        refuses). Returns None only when the answer cannot be parsed into output_schema, so the caller can fall
+        back to the heuristic engine."""
         start = time.monotonic()
         result = None
         try:
             result = agent.run(user_input)
+        except Exception as exc:  # noqa: BLE001
+            err = classify(exc)
+            self._log(agent_name, False, start, len(user_input), str(err), usage=usage_of(result))
+            raise err from exc
+        if _run_failed(result):
+            err = _classify_message(str(getattr(result, "content", "") or ""))
+            self._log(agent_name, False, start, len(user_input), str(err), usage=usage_of(result))
+            raise err
+        try:
             content = result.content
             if isinstance(content, str):
                 content = output_schema.model_validate_json(content)
             elif not isinstance(content, output_schema):
                 content = output_schema.model_validate(content)
-            self._log(agent_name, True, start, len(user_input), usage=usage_of(result))
-            return content
         except Exception as exc:  # noqa: BLE001
-            self._log(agent_name, False, start, len(user_input), str(exc), usage=usage_of(result))
+            if not is_output_error(exc):
+                raise
+            self._log(agent_name, False, start, len(user_input), f"invalid output: {exc}", usage=usage_of(result))
+            record_fallback(agent_name, self.provider, "invalid_output", str(exc))
             return None
+        self._log(agent_name, True, start, len(user_input), usage=usage_of(result))
+        return content
 
     def _log(self, agent: str, ok: bool, start: float, chars: int, error: str | None = None, usage: Usage | None = None) -> None:
         usage = usage or Usage()
         rec = CallRecord(agent, self.provider, self.model_id, ok, int((time.monotonic() - start) * 1000), chars, error, usage)
-        self.calls.append(rec)
-        if len(self.calls) > 1000:
-            del self.calls[:500]
         log.info(
             "model_call agent=%s provider=%s model=%s ok=%s latency_ms=%s input_chars=%s in_tok=%s out_tok=%s error=%s",
             rec.agent, rec.provider, rec.model, rec.ok, rec.latency_ms, rec.input_chars, usage.input_tokens,
@@ -154,6 +250,14 @@ class ModelGateway:
 
         metrics.inc("por_model_calls_total", {"provider": rec.provider, "outcome": "ok" if ok else "failed"})
         record_call(rec)
+
+
+def record_fallback(agent: str, provider: str, reason: str, detail: str = "") -> None:
+    """Count and log a fall back to the heuristic engine. Callers with a session also write an audit event."""
+    from services import metrics
+
+    metrics.inc("por_model_fallbacks_total", {"agent": agent, "reason": reason})
+    log.warning("model_fallback agent=%s provider=%s reason=%s detail=%s", agent, provider, reason, detail[:300])
 
 
 def record_call(rec: CallRecord) -> None:

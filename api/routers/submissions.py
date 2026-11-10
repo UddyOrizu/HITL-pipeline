@@ -8,18 +8,18 @@ import json
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi import Response as FastResponse
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 from starlette.datastructures import UploadFile
 
+from api.downloads import stored_file
 from api.deps import AppPrincipal, get_db, request_channel, require_app
 from api.pagination import Page, paginate
 from db.models import Submission, Workflow
 from services import assurance, audit, evidence, ingestion, jobs, outbound, ratelimit, webhooks, workflow
 from services.config import get_settings
-from services.storage import get_storage
 
 router = APIRouter(prefix="/v1", tags=["source apps"])
 
@@ -103,12 +103,18 @@ async def parse(request: Request) -> tuple[SubmissionIn, tuple[str, bytes] | Non
 
 def create(db: Session, principal: AppPrincipal, body: SubmissionIn, primary: tuple[str, bytes] | None,
            refs: list[tuple[str, bytes]], idem: str | None, actor: str, channel: str) -> tuple[Submission, bool]:
-    """Shared by the source-app API (and MCP, which calls it) and the web portal. Returns (submission, replayed)."""
+    """Shared by the source-app API (and MCP, which calls it) and the web portal. Returns (submission, replayed).
+
+    Idempotency keys are per source app. Every portal submitter shares the tenant's portal app, so the portal passes
+    keys already scoped to the person (portal.scoped_key); as a second guard, a portal replay is only ever returned
+    to the person who sent the original."""
     if idem:
         existing = db.scalars(select(Submission).where(
             Submission.tenant_id == principal.tenant_id, Submission.source_app_id == principal.app.id,
             Submission.idempotency_key == idem)).first()
         if existing:
+            if principal.app.kind == "portal" and (existing.meta or {}).get("submitted_by") != (body.metadata or {}).get("submitted_by"):
+                raise HTTPException(409, "this idempotency key is already in use; choose another")
             return existing, True
     if (primary is None) == (body.text is None):
         raise HTTPException(422, "provide exactly one of 'text' or 'file'")
@@ -216,6 +222,7 @@ def get_feedback(submission_id: str, principal: AppPrincipal = Depends(require_a
 def get_evidence(
     submission_id: str,
     format: str = Query("json", pattern="^(json|pdf)$"),
+    link: bool = Query(False, description="With format=pdf: return a short-lived signed download URL instead of the file"),
     principal: AppPrincipal = Depends(require_app),
     db: Session = Depends(get_db),
 ):
@@ -224,8 +231,7 @@ def get_evidence(
         pack = evidence.latest_pack(db, sub)
         if pack is None:
             raise HTTPException(409, "evidence pack is generated when the decision is released")
-        return Response(get_storage().get(pack.file_uri), media_type="application/pdf",
-                        headers={"Content-Disposition": f'attachment; filename="evidence-{sub.id}.pdf"'})
+        return stored_file(pack.file_uri, f"evidence-{sub.id}.pdf", "application/pdf", link)
     return evidence.build_record(db, sub)
 
 

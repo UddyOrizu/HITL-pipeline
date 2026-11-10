@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run the Proof of Review stack locally: install, migrate, start, stop, status and logs.
 
-Usage (from the repo root, with any Python 3.10+):
+Usage (from the repo root, with Python 3.11 or newer, which the app itself needs):
 
     python run.py up [APP ...] [--seed] [--no-migrate] [--no-install] [--follow]
     python run.py down [APP ...]
@@ -610,5 +610,10 @@ def main() -> None:
     args.func(args)
 
 
+MIN_PYTHON = (3, 11)  # pyproject.toml requires-python; the app uses datetime.UTC and other 3.11 features
+
 if __name__ == "__main__":
+    if sys.version_info < MIN_PYTHON:
+        sys.exit(f"run.py needs Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]} or newer (this is {sys.version.split()[0]}); "
+                 "the .venv it creates uses the same interpreter when uv is not installed.")
     main()

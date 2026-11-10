@@ -10,3 +10,5 @@ web/dist/
 infra/terraform/.terraform/
 infra/terraform/*.tfstate*
 *.egg-info/
+.DS_Store
+*.tsbuildinfo

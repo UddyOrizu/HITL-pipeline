@@ -33,8 +33,45 @@ DEFAULT_WEIGHTS = {
 DEFAULT_POLICY = {"min_score": 60, "below_action": "release_flag"}  # block | second_review | release_flag
 
 
+def _num(v) -> float | None:
+    if isinstance(v, bool):
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if f == f and f not in (float("inf"), float("-inf")) else None
+
+
 def policy_for(workflow: Workflow) -> dict:
-    return {**DEFAULT_POLICY, **{k: v for k, v in (workflow.assurance_policy or {}).items() if v is not None}}
+    """The workflow's assurance policy over the defaults, made safe to use: an unusable min_score or below_action
+    falls back to the default (stored values are validated on save, but older versions may predate that)."""
+    policy = {**DEFAULT_POLICY, **{k: v for k, v in (workflow.assurance_policy or {}).items() if v is not None}}
+    score = _num(policy.get("min_score"))
+    if score is None:
+        policy["min_score"] = DEFAULT_POLICY["min_score"]
+    else:
+        score = min(100.0, max(0.0, score))
+        policy["min_score"] = int(score) if score == int(score) else score
+    if policy.get("below_action") not in ("block", "second_review", "release_flag"):
+        policy["below_action"] = DEFAULT_POLICY["below_action"]
+    return policy
+
+
+def weights_for(workflow: Workflow) -> dict[str, float]:
+    """Component weights: the defaults overridden by the policy's known, numeric weights (clamped to 0..1, unknown
+    keys ignored), then scaled to sum to 1."""
+    raw = policy_for(workflow).get("weights")
+    weights = dict(DEFAULT_WEIGHTS)
+    if isinstance(raw, dict):
+        for k, v in raw.items():
+            n = _num(v)
+            if k in DEFAULT_WEIGHTS and n is not None:
+                weights[k] = min(1.0, max(0.0, n))
+    total = sum(weights.values())
+    if total <= 0:
+        return dict(DEFAULT_WEIGHTS)
+    return {k: v / total for k, v in weights.items()}
 
 
 def load_component(position: float) -> float:
@@ -55,7 +92,7 @@ def task_components(summary: dict) -> dict:
 
 
 def compute(session: Session, submission: Submission, workflow: Workflow, persist: bool = True) -> AssuranceScore:
-    weights = {**DEFAULT_WEIGHTS, **(policy_for(workflow).get("weights") or {})}
+    weights = weights_for(workflow)
     rows = session.execute(
         select(ReviewTask, Decision)
         .join(Decision, Decision.review_task_id == ReviewTask.id)
@@ -82,7 +119,7 @@ def compute(session: Session, submission: Submission, workflow: Workflow, persis
         # Not sampled: redistribute the independent-check weight across the other components.
         active = {k: v for k, v in weights.items() if k != "independent_check"}
         total = sum(active.values())
-        active = {k: v / total for k, v in active.items()}
+        active = {k: v / total for k, v in active.items()} if total > 0 else {k: 0.25 for k in active}
 
     score = round(100 * sum(active[k] * comps[k] for k in active), 1)
     policy = policy_for(workflow)

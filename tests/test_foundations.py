@@ -204,7 +204,7 @@ EXEMPT = {
     ("GET", "/healthz"), ("POST", "/v1/auth/dev-login"), ("POST", "/v1/auth/oidc"), ("POST", "/v1/oauth/token"),
     ("GET", "/v1/files/{key}"), ("POST", "/v1/admin/users"), ("POST", "/v1/admin/teams"), ("POST", "/v1/integrations/apps"),
     ("POST", "/v1/auth/login"), ("GET", "/v1/auth/methods"),
-    ("POST", "/v1/me/password"), ("PATCH", "/v1/me"),  # act only on the signed-in user
+    ("POST", "/v1/me/password"), ("PATCH", "/v1/me"), ("POST", "/v1/me/tokens"),  # act only on the signed-in user
     ("POST", "/v1/auth/refresh"), ("POST", "/v1/auth/logout"), ("POST", "/v1/auth/logout-all"),
     ("POST", "/v1/auth/sso/start"), ("POST", "/v1/auth/sso/callback"), ("POST", "/v1/auth/sso/choose"),
     ("POST", "/v1/auth/forgot-password"), ("POST", "/v1/auth/reset-password"),
