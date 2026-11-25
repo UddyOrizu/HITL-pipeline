@@ -45,7 +45,7 @@ export default function TenantSettings() {
     <div className="admin-page">
       <div className="page-head">
         <div>
-          <h1>Organisation settings</h1>
+          <h1>Organisation</h1>
           <div className="sub">{t ? t.name : "Your organisation"}: reviewing rules, data retention, costs, email and sign-in. Each section saves on its own.</div>
         </div>
       </div>
@@ -141,8 +141,8 @@ function Reviewing({ t, onSaved }: SectionProps) {
     <Section id="reviewing" title="Reviewing" intro={
       <>
         <p>Admins normally don't review. An admin sets the controls that reviewers are measured by (workflows, assignment,
-          canaries, spot-checks and thresholds) and can see and change the records those controls produce. If the same
-          person also reviews, they could mark their own homework, and the evidence pack would no longer show an
+          planted mistakes, spot checks and minimum scores) and can see and change the records those controls produce. If the same
+          person also reviews, they could mark their own homework, and the review record would no longer show an
           independent check. Keeping the roles apart is what auditors expect.</p>
         <p>Allow it only when the organisation is too small for separate people. Admins still need the reviewer role
           given explicitly, and their reviews remain measured and logged like anyone else's.</p>
@@ -153,7 +153,7 @@ function Reviewing({ t, onSaved }: SectionProps) {
           <input type="checkbox" checked={allow} onChange={(e) => setAllow(e.target.checked)} />
           Allow people to have both the admin and reviewer roles
         </label>
-        {allow && !t.allow_admin_reviewers && <div className="notice">Turning this on weakens separation of duties. It is recorded in the audit log.</div>}
+        {allow && !t.allow_admin_reviewers && <div className="notice">Turning this on weakens separation of duties. It is recorded in the activity log.</div>}
         {!allow && t.allow_admin_reviewers && <div className="notice">If anyone has both roles, this can't be turned off until you remove the admin or reviewer role from them on the Users page.</div>}
         <SaveRow a={a} disabled={allow === t.allow_admin_reviewers} dirty={allow !== t.allow_admin_reviewers} />
         {blocked.length > 0 && (
@@ -202,17 +202,17 @@ function Retention({ t, onSaved }: SectionProps) {
             <ul>
               <li>Uploaded files (originals) and the extracted document text</li>
               <li>Claim text and rationale in risk flags</li>
-              <li>Canary text, reviewer comments and suggested edits</li>
-              <li>Reading telemetry</li>
+              <li>Planted mistake text, reviewer comments and suggested edits</li>
+              <li>Reading activity</li>
             </ul>
           </div>
           <div className="explain">
             <h3>Kept</h3>
             <ul>
               <li>Decisions and their reasons</li>
-              <li>Assurance scores</li>
-              <li>The audit log</li>
-              <li>The evidence pack, so you can still prove the review happened</li>
+              <li>Review quality scores</li>
+              <li>The activity log</li>
+              <li>The review record, so you can still prove the review happened</li>
             </ul>
           </div>
         </div>
@@ -238,7 +238,7 @@ function Retention({ t, onSaved }: SectionProps) {
 
       <div className="subsection">
         <h3>Remove one submission's content now</h3>
-        <p className="sub">For an erasure request from a client. The submission must be finished. Decisions, scores, the audit log and the evidence pack are kept; this can't be undone.</p>
+        <p className="sub">For an erasure request from a client. The submission must be finished. Decisions, scores, the activity log and the review record are kept; this can't be undone.</p>
         <form className="inline-form" onSubmit={(e) => { e.preventDefault(); setPurged(null); if (purgeId.trim()) setConfirmPurge(true); }}>
           <input value={purgeId} onChange={(e) => setPurgeId(e.target.value)} placeholder="Submission ID" className="mono" aria-label="Submission ID" />
           <button className="btn danger" type="submit" disabled={!purgeId.trim()}>Remove content…</button>
@@ -252,11 +252,11 @@ function Retention({ t, onSaved }: SectionProps) {
               `/v1/admin/submissions/${encodeURIComponent(purgeId.trim())}/content`, { method: "DELETE" });
             setPurged(r.already_purged
               ? `Submission ${r.submission_id} had already been removed.`
-              : `Content of submission ${r.submission_id} removed (${r.files} file${r.files === 1 ? "" : "s"} deleted). The decision and evidence pack are kept.`);
+              : `Content of submission ${r.submission_id} removed (${r.files} file${r.files === 1 ? "" : "s"} deleted). The decision and review record are kept.`);
             setPurgeId("");
           }}>
-          <p>Permanently remove the files, text, comments and telemetry of submission <span className="mono">{purgeId.trim()}</span>?</p>
-          <p className="sub">The decision, assurance score, audit log and evidence pack are kept. This is recorded in the audit log and can't be undone.</p>
+          <p>Permanently remove the files, text, comments and reading activity of submission <span className="mono">{purgeId.trim()}</span>?</p>
+          <p className="sub">The decision, review quality score, activity log and review record are kept. This is recorded in the activity log and can't be undone.</p>
         </Confirm>
       )}
     </Section>

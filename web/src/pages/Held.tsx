@@ -29,9 +29,9 @@ const LIMIT = 25;
 
 const EXPLAIN: Record<string, string> = {
   spot_check_disagreement: "The blind second reviewer disagreed with the first. Decide the outcome.",
-  below_threshold: "The Review Assurance Score was below this workflow's minimum and policy blocks release.",
+  below_threshold: "The review quality score was below this workflow's minimum, so the work can't be released automatically.",
   awaiting_capacity: "Every eligible reviewer is at their review budget. It will be assigned when capacity frees up, or assign it now.",
-  awaiting_spot_check_reviewer: "No eligible second reviewer is available for the spot-check. Assign one, or decide the outcome yourself.",
+  awaiting_spot_check_reviewer: "No eligible second reviewer is available for the spot check. Assign one, or decide the outcome yourself.",
   release_check_failed: "The content about to be released did not match the original submission. Investigate before releasing.",
 };
 
@@ -90,7 +90,7 @@ function ActionPanel({ d, onDone }: { d: Detail; onDone: (msg: string) => void }
         if (a === "defer") body.reason = deferReason.trim();
         await api(`/v1/oversight/submissions/${d.id}/action`, { body });
         const who = d.reviewers.find((r) => r.id === reviewerId)?.name;
-        onDone(a === "assign" ? `Assigned to ${who}.` : a === "defer" ? "Deferred. The source application has been told."
+        onDone(a === "assign" ? `Assigned to ${who}.` : a === "defer" ? "Deferred. The connected app has been told."
           : a === "retry" ? "Sent back for processing or review." : "Cancelled.");
       }
       setOpen(null);
@@ -130,7 +130,7 @@ function ActionPanel({ d, onDone }: { d: Detail; onDone: (msg: string) => void }
                 <option value="request_changes">Request changes</option>
                 <option value="reject">Reject</option>
               </select>
-              <label htmlFor="ov-reason">Reason {outcome === "approve" ? "(optional)" : "(required)"} – recorded in the evidence pack</label>
+              <label htmlFor="ov-reason">Reason {outcome === "approve" ? "(optional)" : "(required)"} – recorded in the review record</label>
               <textarea id="ov-reason" value={reason} onChange={(e) => setReason(e.target.value)} />
             </>
           )}
@@ -148,19 +148,19 @@ function ActionPanel({ d, onDone }: { d: Detail; onDone: (msg: string) => void }
           )}
           {open === "defer" && (
             <>
-              <label htmlFor="ov-defer">Reason (sent to the source application)</label>
+              <label htmlFor="ov-defer">Reason (sent to the connected app)</label>
               <textarea id="ov-defer" value={deferReason} onChange={(e) => setDeferReason(e.target.value)} />
               <p className="sub" style={{ fontSize: 12, marginTop: 6 }}>Open review tasks close and the item stops here. It can be retried later.</p>
             </>
           )}
           {open === "retry" && <p style={{ margin: 0 }}>Retry this item: it goes back to processing if that failed, otherwise back into review.</p>}
-          {open === "cancel" && <p style={{ margin: 0 }}>Cancel this item. Open review tasks close and the source application is told it was cancelled.</p>}
+          {open === "cancel" && <p style={{ margin: 0 }}>Cancel this item. Open review tasks close and the connected app is told it was cancelled.</p>}
 
           {confirm && (
             <div className="notice">
               {open === "cancel" ? "Cancelling can't be undone. Are you sure?"
-                : open === "defer" ? "Deferring stops review and notifies the source application. Continue?"
-                : "Rejecting releases a final rejection to the source application. Continue?"}
+                : open === "defer" ? "Deferring stops review and notifies the connected app. Continue?"
+                : "Rejecting releases a final rejection to the connected app. Continue?"}
             </div>
           )}
           <ErrorBox error={err} />
@@ -184,7 +184,7 @@ function ReviewCard({ r }: { r: Review }) {
   return (
     <div className={`ov-review ${d ? "" : "pending"}`}>
       <div className="ov-badges" style={{ justifyContent: "space-between" }}>
-        <strong>{r.kind === "spot_check" ? "Spot-check" : r.stage}</strong>
+        <strong>{r.kind === "spot_check" ? "Spot check" : r.stage}</strong>
         {d ? <Badge tone={outcomeTone(d.outcome)}>{label(d.outcome)}</Badge> : <Badge>{label(r.status)}</Badge>}
       </div>
       <div className="sub" style={{ fontSize: 12 }}>
@@ -206,7 +206,7 @@ function ReviewCard({ r }: { r: Review }) {
           {(t.comments || t.edits) ? <><dt>Comments / edits</dt><dd>{t.comments ?? 0} / {t.edits ?? 0}</dd></> : null}
         </dl>
       )}
-      {d && !t && d.channel && d.channel !== "ui" && <p className="sub" style={{ fontSize: 12, marginTop: 8 }}>No reading telemetry: decided outside the workspace.</p>}
+      {d && !t && d.channel && d.channel !== "ui" && <p className="sub" style={{ fontSize: 12, marginTop: 8 }}>No reading activity recorded: the decision was made outside this app.</p>}
       {!!d?.warnings?.length && <ul>{d.warnings.map((w, i) => <li key={i}>{w}</li>)}</ul>}
       {!!r.comments.length && (
         <div style={{ marginTop: 10 }}>
@@ -314,7 +314,7 @@ function DetailDrawer({ id, onClose, onChanged }: { id: string; onClose: () => v
             </section>
 
             <section className="ov-section">
-              <h3>Review Assurance Score</h3>
+              <h3>Review quality score</h3>
               {!d.score_detail ? <p className="sub">Not scored yet.</p> : (
                 <>
                   <p>
@@ -400,8 +400,8 @@ export default function Held() {
     <>
       <div className="page-head">
         <div>
-          <h1>Held items</h1>
-          <div className="sub">Items the workflow will not release on its own, and items deferred back to their source. Nothing here has been released.</div>
+          <h1>On hold</h1>
+          <div className="sub">Work that needs a person to decide before it can go out, and work sent back to where it came from. Nothing here has been released.</div>
         </div>
         <button className="btn" onClick={reload}>Refresh</button>
       </div>

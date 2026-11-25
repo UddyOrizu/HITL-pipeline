@@ -22,6 +22,7 @@ import Reports from "./pages/Reports";
 import Costs from "./pages/Costs";
 import Submit from "./pages/Submit";
 import MySubmissions from "./pages/MySubmissions";
+import Settings, { MovedTo, type SettingsTab } from "./pages/Settings";
 import { RoleBadge } from "./components/ui";
 
 function Shell() {
@@ -36,9 +37,16 @@ function Shell() {
     return <Navigate to="/login" replace />;
   }
   const isAdmin = me.roles.includes("admin");
-  const home = isAdmin ? "/admin/users" : has("reviewer") ? "/queue" : has("submitter") ? "/submissions"
-    : has("oversight_lead") ? "/oversight" : has("auditor") ? "/evidence" : has("integration_owner") ? "/integrations"
-    : me.platform_admin ? "/platform/tenants" : "/account";
+  // Settings: only the tabs this person may use. No tabs, no Settings link.
+  const settingsTabs: SettingsTab[] = [];
+  if (isAdmin || has("oversight_lead")) settingsTabs.push({ to: "/settings/people", label: "People & teams" });
+  if (isAdmin) settingsTabs.push({ to: "/settings/organisation", label: "Organisation" });
+  if (has("oversight_lead")) settingsTabs.push({ to: "/settings/workflows", label: "Review workflows" });
+  if (has("integration_owner")) settingsTabs.push({ to: "/settings/connected-apps", label: "Connected apps" });
+  if (me.platform_admin) settingsTabs.push({ to: "/settings/all-organisations", label: "All organisations" });
+  const settingsHome = settingsTabs[0]?.to;
+  const home = has("reviewer") ? "/queue" : has("submitter") ? "/submissions"
+    : has("oversight_lead") ? "/oversight" : has("auditor") ? "/evidence" : settingsHome || "/account";
   return (
     <div className="shell">
       <nav className="nav" aria-label="Main">
@@ -46,76 +54,59 @@ function Shell() {
           <div className="brand-mark" aria-hidden="true">✓</div>
           Proof of Review
         </div>
-        {(isAdmin || has("oversight_lead")) && (
-          <>
-            <div className="nav-section">Administration</div>
-            <NavLink to="/admin/users">Users &amp; teams</NavLink>
-            {isAdmin && <NavLink to="/admin/settings">Organisation settings</NavLink>}
-          </>
-        )}
-        {me.platform_admin && (
-          <>
-            <div className="nav-section">Platform</div>
-            <NavLink to="/platform/tenants">Organisations</NavLink>
-          </>
-        )}
         {has("reviewer") && (
           <>
             <div className="nav-section">Review</div>
-            <NavLink to="/queue">Review queue</NavLink>
-            <NavLink to="/spot-checks">Spot-checks</NavLink>
-            <NavLink to="/history">My reviews</NavLink>
+            <NavLink to="/queue">To review</NavLink>
+            <NavLink to="/spot-checks">Spot checks</NavLink>
+            <NavLink to="/history">My past reviews</NavLink>
           </>
         )}
         {has("submitter") && (
           <>
-            <div className="nav-section">Submit</div>
-            <NavLink to="/submit">Submit for review</NavLink>
-            <NavLink to="/submissions">My submissions</NavLink>
+            <div className="nav-section">Send work</div>
+            <NavLink to="/submit">Send for review</NavLink>
+            <NavLink to="/submissions">Sent by me</NavLink>
           </>
         )}
         {has("oversight_lead") && (
           <>
-            <div className="nav-section">Oversight</div>
-            <NavLink to="/oversight">Assurance dashboard</NavLink>
-            <NavLink to="/held">Held items</NavLink>
-            <NavLink to="/workflows">Workflow settings</NavLink>
+            <div className="nav-section">Quality</div>
+            <NavLink to="/oversight">Quality overview</NavLink>
+            <NavLink to="/held">On hold</NavLink>
           </>
         )}
         {has("oversight_lead", "auditor") && (
           <>
-            <div className="nav-section">Reporting</div>
+            <div className="nav-section">Reports</div>
             <NavLink to="/reports">Reports</NavLink>
             {has("oversight_lead") && <NavLink to="/costs">Costs</NavLink>}
           </>
         )}
         {has("auditor", "oversight_lead") && (
           <>
-            <div className="nav-section">Audit</div>
-            <NavLink to="/evidence">Evidence explorer</NavLink>
-            <NavLink to="/audit-log">Audit log</NavLink>
+            <div className="nav-section">Records</div>
+            <NavLink to="/evidence">Review records</NavLink>
+            <NavLink to="/audit-log">Activity log</NavLink>
           </>
         )}
-        {has("integration_owner") && (
-          <>
-            <div className="nav-section">Integrations</div>
-            <NavLink to="/integrations">Integrations console</NavLink>
-          </>
-        )}
-        <div className="who">
-          <div style={{ fontWeight: 600, color: "var(--text)" }}>{me.name || me.email}</div>
-          <div>{me.tenant?.name}</div>
-          <div className="btn-row" style={{ gap: 4, margin: "6px 0" }}>
-            {me.roles.map((r) => <RoleBadge key={r} role={r} />)}
+        <div className="nav-foot">
+          {settingsHome && <NavLink to="/settings">Settings</NavLink>}
+          <div className="who">
+            <div className="who-name">{me.name || me.email}</div>
+            <div>{me.tenant?.name}</div>
+            <div className="btn-row" style={{ gap: 4, margin: "6px 0" }}>
+              {me.roles.map((r) => <RoleBadge key={r} role={r} />)}
+            </div>
+            <button className="btn small" onClick={() => setAccount(true)}>Your account</button>
           </div>
-          <button className="btn small" onClick={() => setAccount(true)}>Your account</button>
         </div>
       </nav>
       {account && <Account onClose={() => setAccount(false)} />}
       <main className="main" id="main">
         <Routes>
           <Route path="/" element={<Navigate to={home} replace />} />
-          <Route path="/account" element={<div className="empty">Your account has no pages yet. Ask an admin for access.</div>} />
+          <Route path="/account" element={<div className="empty">You don't have access to anything yet. Ask your administrator to give you access.</div>} />
           {has("reviewer") && (
             <>
               <Route path="/queue" element={<Queue kind="primary" />} />
@@ -134,7 +125,6 @@ function Shell() {
             <>
               <Route path="/oversight" element={<Dashboard />} />
               <Route path="/held" element={<Held />} />
-              <Route path="/workflows" element={<Workflows />} />
               <Route path="/costs" element={<Costs />} />
             </>
           )}
@@ -145,10 +135,23 @@ function Shell() {
               <Route path="/audit-log" element={<AuditLog />} />
             </>
           )}
-          {has("integration_owner") && <Route path="/integrations" element={<Integrations />} />}
-          {(isAdmin || has("oversight_lead")) && <Route path="/admin/users" element={<Users />} />}
-          {isAdmin && <Route path="/admin/settings" element={<TenantSettings />} />}
-          {me.platform_admin && <Route path="/platform/tenants" element={<Tenants />} />}
+          {settingsHome && (
+            <Route path="/settings" element={<Settings tabs={settingsTabs} />}>
+              <Route index element={<Navigate to={settingsHome} replace />} />
+              {(isAdmin || has("oversight_lead")) && <Route path="people" element={<Users />} />}
+              {isAdmin && <Route path="organisation" element={<TenantSettings />} />}
+              {has("oversight_lead") && <Route path="workflows" element={<Workflows />} />}
+              {has("integration_owner") && <Route path="connected-apps" element={<Integrations />} />}
+              {me.platform_admin && <Route path="all-organisations" element={<Tenants />} />}
+              <Route path="*" element={<Navigate to={settingsHome} replace />} />
+            </Route>
+          )}
+          {/* Addresses from before Settings existed. */}
+          <Route path="/admin/users" element={<MovedTo to="/settings/people" />} />
+          <Route path="/admin/settings" element={<MovedTo to="/settings/organisation" />} />
+          <Route path="/workflows" element={<MovedTo to="/settings/workflows" />} />
+          <Route path="/integrations" element={<MovedTo to="/settings/connected-apps" />} />
+          <Route path="/platform/tenants" element={<MovedTo to="/settings/all-organisations" />} />
           <Route path="*" element={<Navigate to={home} replace />} />
         </Routes>
       </main>

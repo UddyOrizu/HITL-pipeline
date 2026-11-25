@@ -339,7 +339,7 @@ export default function Workspace() {
               <Badge tone="accent">revision of {view.submission.previous_submission_id.slice(0, 8)}</Badge>
             )}
             <Badge>{label(view.submission.content_origin)}</Badge>
-            {view.task.kind === "spot_check" && <Badge tone="medium">blind spot-check</Badge>}
+            {view.task.kind === "spot_check" && <Badge tone="medium">blind spot check</Badge>}
             {refs.length > 0 && <Badge>{refs.length} reference document{refs.length === 1 ? "" : "s"}</Badge>}
             <span className="sub">{view.submission.workflow} · {view.task.stage} · about {view.task.effort_minutes} min</span>
           </div>
@@ -515,10 +515,10 @@ export default function Workspace() {
 
       {reveal && (
         <div className="modal-back">
-          <div className="modal" role="dialog" aria-modal="true" aria-label="Canary result">
+          <div className="modal" role="dialog" aria-modal="true" aria-label="Planted mistake result">
             {reveal.items.map((c, i) => (
               <div key={i}>
-                <h2>{c.caught ? "You caught a canary" : "This review contained a canary"}</h2>
+                <h2>{c.caught ? "You spotted a planted mistake" : "This review contained a planted mistake"}</h2>
                 <p>{c.message}</p>
                 <p className="sub">{c.explanation} Difficulty: {c.difficulty}.</p>
                 <div className="canary-text">{c.canary_text}</div>

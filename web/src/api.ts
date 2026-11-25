@@ -172,7 +172,7 @@ export async function apiPage<T = any>(path: string, options: Options = {}): Pro
 }
 
 // Every item of a list endpoint, following X-Next-Offset when the server pages it (one request when it doesn't).
-// For short admin lists (users, teams, workflows, source apps, connectors) that the UI filters on the client.
+// For short admin lists (users, teams, workflows, connected apps, connectors) that the UI filters on the client.
 export async function apiAll<T = any>(path: string, maxPages = 50): Promise<T[]> {
   const all: T[] = [];
   let offset = 0;

@@ -3,7 +3,14 @@ import { api } from "../../api";
 import { Badge, Empty, Modal } from "../ui";
 import { Confirm, CopyButton, Err, useAction } from "../admin/common";
 import { SecretModal, type SecretItem } from "./SecretModal";
-import { fullTime, type AppSecrets, type Loaded, type SourceApp } from "./types";
+import { fullTime, type AppKey, type AppSecrets, type Loaded, type NewKey, type SourceApp } from "./types";
+
+const EXPIRY = [
+  { days: 0, label: "Never", hint: "Works until you revoke it." },
+  { days: 30, label: "30 days", hint: "For a trial or a short piece of work." },
+  { days: 90, label: "90 days", hint: "A common choice for keys that are replaced each quarter." },
+  { days: 365, label: "1 year", hint: "" },
+];
 
 const GRACE = [
   { hours: 0, label: "None", hint: "The old key stops working immediately. Use this if the key may have leaked." },
@@ -17,6 +24,7 @@ type Secrets = { title: string; items: SecretItem[]; note?: string };
 type Dialog =
   | { kind: "edit"; app: SourceApp }
   | { kind: "rotate"; app: SourceApp }
+  | { kind: "new-key"; app: SourceApp }
   | { kind: "confirm"; title: string; body: React.ReactNode; label: string; danger?: boolean; action: () => Promise<unknown> }
   | null;
 
@@ -101,6 +109,18 @@ export function SourceApps({ apps }: { apps: Loaded<SourceApp[]> }) {
     });
   }
 
+  function revokeKey(a: SourceApp, k: AppKey) {
+    setDialog({
+      kind: "confirm", title: `Revoke the key "${k.name}"`, label: "Revoke key", danger: true,
+      body: <p>The key <span className="mono">{k.prefix}…</span> for <strong>{a.name}</strong> stops working immediately.
+        Anything still using it will be refused. The app's other keys are not affected. This can't be undone.</p>,
+      action: async () => {
+        await api(path(a, `/keys/${k.id}`), { method: "DELETE" });
+        apps.reload();
+      },
+    });
+  }
+
   function setActive(a: SourceApp, active: boolean) {
     if (active) {
       list.run(`active:${a.id}`, async () => {
@@ -111,7 +131,7 @@ export function SourceApps({ apps }: { apps: Loaded<SourceApp[]> }) {
     }
     setDialog({
       kind: "confirm", title: `Deactivate ${a.name}`, label: "Deactivate", danger: true,
-      body: <p>Requests with this app's API key or OAuth tokens are refused and its connectors stop submitting.
+      body: <p>Requests with any of this app's API keys or OAuth tokens are refused and its connectors stop submitting.
         Nothing is deleted, and you can activate it again later.</p>,
       action: async () => {
         await api(path(a), { method: "PATCH", body: { active: false } });
@@ -138,14 +158,14 @@ export function SourceApps({ apps }: { apps: Loaded<SourceApp[]> }) {
       }} />
 
       <div className="section-head">
-        <h2>Source applications</h2>
+        <h2>Connected apps</h2>
         <button className="btn small" onClick={apps.reload} disabled={apps.loading}>Refresh</button>
       </div>
       <Err error={apps.error} />
       <Err error={list.error} />
       {list.ok && <div className="success">{list.ok}</div>}
       {apps.loading && !apps.data ? <div className="sub">Loading…</div>
-        : !apps.error && !apps.data?.length ? <div className="card"><Empty>No source applications yet. Register one above to get an API key.</Empty></div>
+        : !apps.error && !apps.data?.length ? <div className="card"><Empty>No connected apps yet. Register one above to get an API key.</Empty></div>
         : (
           <div className="app-list">
             {apps.data?.map((a) => (
@@ -160,18 +180,44 @@ export function SourceApps({ apps }: { apps: Loaded<SourceApp[]> }) {
                     {a.oauth_enabled && <Badge tone="accent">OAuth</Badge>}
                   </div>
                 </header>
+                <div className="key-head">
+                  <h4>API keys</h4>
+                  <button className="btn small primary" onClick={() => setDialog({ kind: "new-key", app: a })}>Create API key</button>
+                </div>
+                <p className="sub hint">Each key works on its own, so you can give one to each tool or person and
+                  revoke it without affecting the others. A key is shown once, when it is created.</p>
+                <div className="table-wrap">
+                  <table className="key-table">
+                    <thead><tr><th>Name</th><th>Starts with</th><th>Created</th><th>Last used</th><th>Expires</th><th /></tr></thead>
+                    <tbody>
+                      {(a.keys || []).map((k) => (
+                        <tr key={k.id}>
+                          <td>{k.name}</td>
+                          <td><span className="mono">{k.prefix}…</span></td>
+                          <td>{fullTime(k.created_at)}</td>
+                          <td>{k.original ? <span className="sub">not tracked</span> : k.last_used_at ? fullTime(k.last_used_at) : <span className="sub">never</span>}</td>
+                          <td>{k.expired ? <Badge tone="high">expired</Badge> : k.expires_at ? fullTime(k.expires_at) : <span className="sub">never</span>}</td>
+                          <td className="key-actions">
+                            {k.original
+                              ? <button className="btn small" onClick={() => setDialog({ kind: "rotate", app: a })}>Replace</button>
+                              : <button className="btn small danger" onClick={() => revokeKey(a, k)}>Revoke</button>}
+                          </td>
+                        </tr>
+                      ))}
+                      {a.previous_key_valid_until && (
+                        <tr>
+                          <td>Original key (before it was replaced)</td>
+                          <td />
+                          <td />
+                          <td />
+                          <td><span className="notice inline-notice">Works until {fullTime(a.previous_key_valid_until)}</span></td>
+                          <td className="key-actions"><button className="btn small danger" onClick={() => revokePrevious(a)}>Revoke now</button></td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
                 <dl className="kv">
-                  <dt>API key</dt>
-                  <dd><span className="mono">{a.api_key_prefix}…</span></dd>
-                  {a.previous_key_valid_until && (
-                    <>
-                      <dt>Old key</dt>
-                      <dd>
-                        <span className="notice inline-notice">Still valid until {fullTime(a.previous_key_valid_until)}</span>{" "}
-                        <button className="btn small danger" onClick={() => revokePrevious(a)}>Revoke old key now</button>
-                      </dd>
-                    </>
-                  )}
                   <dt>Webhook URL</dt>
                   <dd className="break">{a.webhook_url || <span className="sub">none (the app polls for results)</span>}</dd>
                   <dt>OAuth client</dt>
@@ -181,7 +227,6 @@ export function SourceApps({ apps }: { apps: Loaded<SourceApp[]> }) {
                 </dl>
                 <div className="btn-row app-actions">
                   <button className="btn small" onClick={() => setDialog({ kind: "edit", app: a })}>Edit</button>
-                  <button className="btn small" onClick={() => setDialog({ kind: "rotate", app: a })}>Rotate API key</button>
                   <button className="btn small" onClick={() => rotateWebhookSecret(a)}>Rotate webhook secret</button>
                   {a.oauth_enabled ? (
                     <>
@@ -205,11 +250,23 @@ export function SourceApps({ apps }: { apps: Loaded<SourceApp[]> }) {
           setDialog(null);
           apps.reload();
           setSecrets({
-            title: `New API key for ${r.name}`,
+            title: `New original key for ${r.name}`,
             note: grace && r.previous_key_valid_until
-              ? `The old key keeps working until ${fullTime(r.previous_key_valid_until)}. Revoke it sooner from the app card once you have redeployed.`
+              ? `The old key keeps working until ${fullTime(r.previous_key_valid_until)}. Revoke it sooner from the app's key list once you have switched over.`
               : "The old key has stopped working.",
             items: [{ label: "API key", value: r.api_key }],
+          });
+        }} />
+      )}
+      {dialog?.kind === "new-key" && (
+        <CreateKey app={dialog.app} onClose={() => setDialog(null)} onCreated={(k) => {
+          const app = dialog.app;
+          setDialog(null);
+          apps.reload();
+          setSecrets({
+            title: `New API key for ${app.name}`,
+            note: `"${k.name}" works straight away, alongside this app's other keys. ${k.expires_at ? `It stops working on ${fullTime(k.expires_at)}.` : "It works until you revoke it."}`,
+            items: [{ label: "API key", value: k.api_key }],
           });
         }} />
       )}
@@ -243,7 +300,7 @@ function CreateApp({ onCreated }: { onCreated: (r: AppSecrets) => void }) {
   return (
     <div className="grid grid-2 block-gap">
       <form className="card" onSubmit={create}>
-        <h2>Register a source application</h2>
+        <h2>Register a connected app</h2>
         <label htmlFor="app-name">Name</label>
         <input id="app-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Drafting assistant" maxLength={200} required />
         <label htmlFor="app-hook">Webhook URL (optional)</label>
@@ -303,6 +360,45 @@ function EditApp({ app, onClose, onSaved }: { app: SourceApp; onClose: () => voi
   );
 }
 
+function CreateKey({ app, onClose, onCreated }: { app: SourceApp; onClose: () => void; onCreated: (k: NewKey) => void }) {
+  const [name, setName] = useState("");
+  const [days, setDays] = useState(0);
+  const a = useAction();
+
+  async function create(e: React.FormEvent) {
+    e.preventDefault();
+    const r = await a.run("create", () => api<NewKey>(`/v1/integrations/apps/${app.id}/keys`, {
+      body: { name: name.trim(), expires_in_days: days || null },
+    }));
+    if (r) onCreated(r);
+  }
+
+  return (
+    <Modal title={`Create an API key for ${app.name}`} onClose={onClose}>
+      <form onSubmit={create}>
+        <p>This adds a key. The keys this app already has keep working.</p>
+        <label htmlFor="key-name">What is this key for?</label>
+        <input id="key-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Finance bot, or Sam's laptop" maxLength={200} required autoFocus />
+        <div className="sub hint">A name helps you tell the keys apart later and revoke the right one.</div>
+        <fieldset className="choice-list">
+          <legend>When should it stop working?</legend>
+          {EXPIRY.map((x) => (
+            <label key={x.days} className={`choice${days === x.days ? " on" : ""}`}>
+              <input type="radio" name="expiry" checked={days === x.days} onChange={() => setDays(x.days)} />
+              <span><strong>{x.label}</strong>{x.hint && <span className="sub">{x.hint}</span>}</span>
+            </label>
+          ))}
+        </fieldset>
+        <Err error={a.error} />
+        <div className="btn-row modal-actions">
+          <button type="button" className="btn" onClick={onClose}>Cancel</button>
+          <button type="submit" className="btn primary" disabled={!name.trim() || !!a.busy}>{a.busy ? "Creating…" : "Create key"}</button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
 function RotateKey({ app, onClose, onRotated }: { app: SourceApp; onClose: () => void; onRotated: (r: AppSecrets, grace: number) => void }) {
   const [grace, setGrace] = useState(24);
   const a = useAction();
@@ -313,8 +409,8 @@ function RotateKey({ app, onClose, onRotated }: { app: SourceApp; onClose: () =>
   }
 
   return (
-    <Modal title={`Rotate API key for ${app.name}`} onClose={onClose}>
-      <p>A new key is created and shown once. How long should the current key (<span className="mono">{app.api_key_prefix}…</span>) keep working?</p>
+    <Modal title={`Replace the original key for ${app.name}`} onClose={onClose}>
+      <p>A new key is created and shown once. Keys you created separately are not affected. How long should the current original key (<span className="mono">{app.api_key_prefix}…</span>) keep working?</p>
       {app.previous_key_valid_until && (
         <div className="notice">An older key is still in its grace period (until {fullTime(app.previous_key_valid_until)}). Rotating again ends it now: only the current key gets a grace period.</div>
       )}
@@ -331,7 +427,7 @@ function RotateKey({ app, onClose, onRotated }: { app: SourceApp; onClose: () =>
       <div className="btn-row modal-actions">
         <button className="btn" onClick={onClose}>Cancel</button>
         <button className={`btn ${grace === 0 ? "danger" : "primary"}`} disabled={!!a.busy} onClick={rotate}>
-          {a.busy ? "Rotating…" : grace === 0 ? "Rotate and revoke old key" : "Rotate key"}
+          {a.busy ? "Replacing…" : grace === 0 ? "Replace and revoke old key" : "Replace key"}
         </button>
       </div>
     </Modal>

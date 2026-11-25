@@ -9,7 +9,7 @@ type Chain = { valid: boolean; count: number; broken_at: number | null; head?: s
 const LIMIT = 25;
 const STATUSES = ["received", "processing", "in_review", "spot_check", "approved", "rejected", "changes_requested", "deferred", "cancelled"];
 
-// Evidence record spot_check: {sampled, pending, agreement, spot_check_outcome}. A sampled spot-check not yet decided
+// Evidence record spot_check: {sampled, pending, agreement, spot_check_outcome}. A sampled spot check not yet decided
 // is pending (agreement null), which is neither an agreement nor a disagreement.
 function spotCheckText(sc: { sampled?: boolean; pending?: boolean; agreement?: boolean | null; spot_check_outcome?: string | null } | null | undefined) {
   if (!sc?.sampled) return "not sampled";
@@ -28,10 +28,10 @@ function Record({ id }: { id: string }) {
         <h3>Decision</h3>
         <div className="kv">
           <span className="k">Outcome</span><span>{label(r.submission.final_outcome || r.submission.status)}</span>
-          <span className="k">Assurance score</span><span>{r.assurance?.score ?? "–"}{r.assurance?.below_threshold ? " (below threshold)" : ""}</span>
+          <span className="k">Review quality score</span><span>{r.assurance?.score ?? "–"}{r.assurance?.below_threshold ? " (below the minimum)" : ""}</span>
           <span className="k">Workflow</span><span>{r.workflow.name} v{r.workflow.version}</span>
-          <span className="k">Canary</span><span>{r.canary.present ? r.canary.items.map((c: any) => `${c.difficulty} ${label(c.type)}: ${c.caught ? "caught" : "missed"}`).join(", ") : "none"}</span>
-          <span className="k">Spot-check</span><span>{spotCheckText(r.spot_check)}</span>
+          <span className="k">Planted mistake</span><span>{r.canary.present ? r.canary.items.map((c: any) => `${c.difficulty} ${label(c.type)}: ${c.caught ? "spotted" : "missed"}`).join(", ") : "none"}</span>
+          <span className="k">Spot check</span><span>{spotCheckText(r.spot_check)}</span>
           <span className="k">Audit chain</span><span>{r.audit_chain.valid ? `valid (${r.audit_chain.events_in_tenant_chain} events)` : "BROKEN"}</span>
         </div>
         <h3 style={{ marginTop: 14 }}>Content hashes</h3>
@@ -84,8 +84,8 @@ export default function Evidence() {
     <>
       <div className="page-head">
         <div>
-          <h1>Evidence explorer</h1>
-          <div className="sub">Read-only. Every decision, with the evidence to show how it was reviewed.</div>
+          <h1>Review records</h1>
+          <div className="sub">Every decision, with proof of how it was reviewed. You can read these but not change them.</div>
         </div>
         {chain && (chain.valid
           ? <Badge tone="ok">Audit chain verified · {chain.count} events</Badge>

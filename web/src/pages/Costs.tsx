@@ -23,7 +23,7 @@ type CostReport = {
 };
 
 const GROUPS = [
-  { id: "source_app", name: "Source app" },
+  { id: "source_app", name: "Connected app" },
   { id: "workflow", name: "Workflow" },
   { id: "team", name: "Team" },
   { id: "reviewer", name: "Reviewer" },
@@ -137,8 +137,8 @@ function CostBody({ data, from, to, loading, error, isAdmin }: {
   const groupName = GROUPS.find((g) => g.id === data.group_by)?.name || "Group";
   const reviewMinutes = t.review_minutes + t.estimated_minutes;
   const settingsLink = isAdmin
-    ? <Link to="/admin/settings">Organisation settings</Link>
-    : "Organisation settings (ask an admin)";
+    ? <Link to="/settings/organisation">Settings › Organisation</Link>
+    : "Settings › Organisation (ask an admin)";
 
   // Chart rows: a continuous time axis for periods; otherwise the largest groups, the rest folded into "Other".
   let chartRows: Row[];
@@ -175,7 +175,7 @@ function CostBody({ data, from, to, loading, error, isAdmin }: {
     { key: "output_tokens", label: "Output tokens", numeric: true, value: (r) => r.output_tokens, render: (r) => num(r.output_tokens) },
     { key: "model_calls", label: "Model calls", numeric: true, value: (r) => r.model_calls, render: (r) => num(r.model_calls) },
     { key: "review_minutes", label: "Measured time", numeric: true, value: (r) => r.review_minutes, render: (r) => mins(r.review_minutes), hint: "Active reading time measured in the workspace" },
-    { key: "estimated_minutes", label: "Estimated time", numeric: true, value: (r) => r.estimated_minutes, render: (r) => mins(r.estimated_minutes), hint: "Effort estimates for API and MCP decisions (no reading telemetry)" },
+    { key: "estimated_minutes", label: "Estimated time", numeric: true, value: (r) => r.estimated_minutes, render: (r) => mins(r.estimated_minutes), hint: "Effort estimates for API and MCP decisions (no reading activity recorded)" },
     { key: "unrated_minutes", label: "Unrated time", numeric: true, value: (r) => r.unrated_minutes, render: (r) => mins(r.unrated_minutes), hint: "Reviewer time with no hourly rate; it costs nothing here" },
     { key: "tasks", label: "Tasks", numeric: true, value: (r) => r.tasks, render: (r) => num(r.tasks) },
     { key: "submissions", label: "Submissions", numeric: true, value: (r) => r.submissions, render: (r) => num(r.submissions) },
@@ -216,7 +216,7 @@ function CostBody({ data, from, to, loading, error, isAdmin }: {
       )}
       {t.estimated_minutes > 0 && (
         <div className="rp-info" role="note">
-          {mins(t.estimated_minutes)} of review time is estimated: decisions made through the API or MCP have no reading telemetry, so each task's effort estimate is used instead.
+          {mins(t.estimated_minutes)} of review time is estimated: decisions made through the API or MCP have no reading activity recorded, so each task's effort estimate is used instead.
         </div>
       )}
 
@@ -264,7 +264,7 @@ function CostBody({ data, from, to, loading, error, isAdmin }: {
         <ul>
           <li><strong>Model spend</strong> is tokens × the price per million tokens for each model (input, output, cache reads and cache writes). Prices are USD list prices as of {data.prices_as_of}, or your own prices from {settingsLink}, converted to {cur}{showUsd ? ` at ${data.usd_to_currency} ${cur} per USD` : ""}. A price change applies to past periods too.</li>
           <li><strong>Reviewer time</strong> is the active reading time measured in the review workspace × an hourly rate: the reviewer's own rate, else their team's, else the organisation default{data.default_hourly_rate != null ? ` (${m(data.default_hourly_rate)} an hour)` : " (not set)"}.</li>
-          <li>Decisions made through the API or MCP have no reading telemetry, so the task's effort estimate is used and shown as <em>estimated time</em>.</li>
+          <li>Decisions made through the API or MCP have no reading activity recorded, so the task's effort estimate is used and shown as <em>estimated time</em>.</li>
           <li>Time with no hourly rate at any level is <em>unrated</em> and costs nothing; usage of a model with no price counts as zero spend.</li>
           <li><strong>Cost per submission</strong> is the total divided by the submissions that had model usage or a completed review in range. Model usage that isn't linked to a submission still counts toward the total.</li>
         </ul>

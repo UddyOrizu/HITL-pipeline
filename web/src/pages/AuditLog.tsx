@@ -154,8 +154,8 @@ export default function AuditLog() {
     <>
       <div className="page-head">
         <div>
-          <h1>Audit log</h1>
-          <div className="sub">Every action in the organisation, newest first. Each event is hash-chained to the one before it.</div>
+          <h1>Activity log</h1>
+          <div className="sub">Everything that has happened in your organisation, newest first. Entries are linked together, so any change to the record would be detected.</div>
         </div>
         <div className="btn-row">
           <button className="btn" onClick={() => { chain.reload(); loadFirst(); }}>Refresh</button>

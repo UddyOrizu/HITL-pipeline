@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import timedelta
 
 import jwt
 from fastapi import Depends, Header, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from db.models import RevokedToken, SourceApp, Tenant, User, utcnow
+from db.models import RevokedToken, SourceApp, SourceAppKey, Tenant, User, utcnow
 from db.session import new_session, set_tenant
 from services.security import constant_time_equal, decode_token, epoch, hash_secret, oauth_fingerprint
 
@@ -106,6 +107,17 @@ def require_app(
                         and constant_time_equal(candidate.previous_key_hash, hashed)):
                     app = candidate
                     break
+        if app is None:
+            # Extra keys: an app can have several live at once, each revoked or expiring on its own.
+            now = utcnow()
+            for extra in db.scalars(select(SourceAppKey).where(SourceAppKey.key_prefix == token[:12],
+                                                               SourceAppKey.revoked_at.is_(None))).all():
+                if (extra.expires_at is None or extra.expires_at > now) and constant_time_equal(extra.key_hash, hashed):
+                    app = db.get(SourceApp, extra.source_app_id)
+                    # "Last used" is for spotting keys nobody uses: minute precision is plenty, and saves a write per request.
+                    if extra.last_used_at is None or now - extra.last_used_at > timedelta(minutes=1):
+                        extra.last_used_at = now
+                    break
     else:
         try:
             claims = decode_token(token)
@@ -177,6 +189,30 @@ def current_user(
     request.state.tenant_id = user.tenant_id
     request.state.token_claims = claims
     return UserPrincipal(user)
+
+
+def require_reviewer(
+    request: Request,
+    db: Session = Depends(get_db),
+    authorization: str | None = Header(default=None),
+    x_api_key: str | None = Header(default=None),
+) -> UserPrincipal:
+    """A signed-in user with the reviewer role, or a source app API key (por_...) that an integration owner has
+    allowed to review (SourceApp.review_as_user_id). The key then acts as that reviewer account: it sees that
+    reviewer's queue and its decisions are recorded under that account, with the app noted in the audit log."""
+    key = x_api_key or _bearer(authorization)
+    if key and key.startswith("por_"):
+        app = require_app(request, db, authorization, x_api_key).app
+        user = db.get(User, app.review_as_user_id) if app.review_as_user_id else None
+        if user is None or not user.active or user.tenant_id != app.tenant_id or "reviewer" not in (user.roles or []):
+            raise HTTPException(403, "this source app key is not allowed to review: an integration owner must choose "
+                                     "an active reviewer account for it to review as")
+        request.state.review_app_id = app.id
+        return UserPrincipal(user)
+    principal = current_user(request, db, authorization)
+    if not principal.has("reviewer"):
+        raise HTTPException(403, "requires role: reviewer")
+    return principal
 
 
 def platform_admin(principal: UserPrincipal = Depends(current_user), db: Session = Depends(get_db)) -> UserPrincipal:

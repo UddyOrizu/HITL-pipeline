@@ -61,15 +61,15 @@ export function Connectors({ apps }: { apps: Loaded<SourceApp[]> }) {
       <div className="section-head">
         <div>
           <h2>Connectors</h2>
-          <div className="sub">SharePoint / OneDrive folders, Microsoft Teams notifications, and Jira or Azure DevOps tickets. Each connector acts as one of your source apps.</div>
+          <div className="sub">SharePoint / OneDrive folders, Microsoft Teams notifications, and Jira or Azure DevOps tickets. Each connector acts as one of your connected apps.</div>
         </div>
         <div className="btn-row">
           <button className="btn small" onClick={() => { connectors.reload(); workflows.reload(); }} disabled={connectors.loading}>Refresh</button>
-          <button className="btn small primary" disabled={!kinds.data || !apps.data?.length} title={noApps ? "Register a source application first" : undefined}
+          <button className="btn small primary" disabled={!kinds.data || !apps.data?.length} title={noApps ? "Register a connected app first" : undefined}
             onClick={() => setEditing("new")}>Add connector</button>
         </div>
       </div>
-      {noApps && <div className="notice">Register a source application first: connectors submit and receive decisions as one of your apps.</div>}
+      {noApps && <div className="notice">Register a connected app first: connectors submit and receive decisions as one of your apps.</div>}
       <Err error={apps.error} />
       <Err error={connectors.error} />
       <Err error={kinds.error} />
@@ -363,7 +363,7 @@ function ConnectorForm({ existing, kinds, apps, workflows, onClose, onSaved }: {
         {info && <p className="sub">{info.blurb}</p>}
 
         <div className="field">
-          <label htmlFor="cf-app">Source application</label>
+          <label htmlFor="cf-app">Connected app</label>
           {existing
             ? <div>{app?.name ?? appId} <span className="sub small-text">(can't be changed; create a new connector to use another app)</span></div>
             : (

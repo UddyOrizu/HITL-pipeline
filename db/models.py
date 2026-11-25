@@ -119,6 +119,25 @@ class SourceApp(TenantScoped, Base):
     previous_key_prefix: Mapped[str | None] = mapped_column(String(16), index=True, nullable=True)
     previous_key_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
     previous_key_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Off (null) by default. When set, this app's API key may also call the review endpoints, acting as that
+    # reviewer account: one key can then submit work and decide it (for example one MCP server doing both).
+    review_as_user_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+
+
+class SourceAppKey(TenantScoped, Base):
+    """An extra API key for a source app. An app can have several live at once (one per deployment, script or
+    person), each named and revoked on its own. The app's original key stays on SourceApp and works alongside."""
+
+    __tablename__ = "source_app_keys"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    source_app_id: Mapped[str] = mapped_column(String(36), ForeignKey("source_apps.id"), index=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    key_prefix: Mapped[str] = mapped_column(String(16), index=True, nullable=False)
+    key_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # null: no expiry
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 # --- Workflows --------------------------------------------------------------------------

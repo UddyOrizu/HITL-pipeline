@@ -13,8 +13,15 @@ Every HTTP request must then send "Authorization: Bearer <POR_MCP_HTTP_TOKEN>". 
 starts when bound to 127.0.0.1 / localhost (local development). In --http mode file_path is turned off, so remote
 callers cannot read the server's own files: they send file_base64 with filename, or content.
 
-A server runs in one mode only. If one server held both credentials, a single agent could submit work and then
-approve it, which is exactly what a human-in-the-loop gate exists to prevent.
+One server can also do both with a single key, the source app key:
+    POR_MCP_API_URL=http://localhost:8000 POR_MCP_API_KEY=por_... POR_MCP_REVIEW_WITH_API_KEY=true \\
+        python -m mcp_server.server
+This only works once an integration owner has chosen a reviewer account for that source app to review as
+(PATCH /v1/integrations/apps/{id} with review_as_user_id). The key then works that reviewer's queue, and decisions
+are recorded under that account with the app noted in the audit log. It is off by default because whoever holds
+the key can then submit work and approve it, which is what a human-in-the-loop gate normally prevents.
+
+A server never holds two credentials: set POR_MCP_API_KEY or POR_MCP_REVIEWER_TOKEN, not both.
 """
 
 from __future__ import annotations
@@ -40,19 +47,31 @@ REVIEWER_INSTRUCTIONS = (
 )
 
 
+BOTH_INSTRUCTIONS = (
+    "This server both submits work for human review and works a reviewer's queue. " + SUBMITTER_INSTRUCTIONS + " "
+    + REVIEWER_INSTRUCTIONS
+)
+INSTRUCTIONS = {"submitter": SUBMITTER_INSTRUCTIONS, "reviewer": REVIEWER_INSTRUCTIONS, "both": BOTH_INSTRUCTIONS}
+
+
 def mode() -> str:
+    """submitter, reviewer, or both (one source app key that is also allowed to review)."""
     has_key, has_token = bool(os.environ.get("POR_MCP_API_KEY")), bool(os.environ.get("POR_MCP_REVIEWER_TOKEN"))
     if has_key and has_token:
-        raise SystemExit("Set POR_MCP_API_KEY (submitter) or POR_MCP_REVIEWER_TOKEN (reviewer), not both: one agent must "
-                         "not be able to submit work and approve it. Run two servers if you need both.")
-    return "reviewer" if has_token else "submitter"
+        raise SystemExit("Set POR_MCP_API_KEY or POR_MCP_REVIEWER_TOKEN, not both. To submit and review on one server, "
+                         "keep only POR_MCP_API_KEY, set POR_MCP_REVIEW_WITH_API_KEY=true, and choose a reviewer account "
+                         "for that source app to review as (python -m scripts.app_key_review, or review_as_user_id "
+                         "in the Integrations API).")
+    if has_token:
+        return "reviewer"
+    return "both" if has_key and tools.review_with_api_key() else "submitter"
 
 
 def build(which: str, hosted: bool = False) -> MCPServer:
     """hosted: served over HTTP, so file_path (a path on this server's disk) is turned off."""
     tools.set_allow_file_paths(not hosted)
-    srv = MCPServer(name=f"proof-of-review-{which}", instructions=REVIEWER_INSTRUCTIONS if which == "reviewer" else SUBMITTER_INSTRUCTIONS)
-    for fn, description in (SUBMITTER_TOOLS if which == "submitter" else REVIEWER_TOOLS):
+    srv = MCPServer(name=f"proof-of-review-{which}", instructions=INSTRUCTIONS[which])
+    for fn, description in TOOLS[which]:
         if hosted and fn is submit_for_review:
             description = HOSTED_SUBMIT_DESCRIPTION
         srv.tool(description=description)(fn)
@@ -127,6 +146,7 @@ REVIEWER_TOOLS = [
     (add_review_comment, "Add the reviewer's comment, optionally on a span, optionally with suggested replacement text."),
     (submit_review_decision, "Record the reviewer's decision: approve, reject or request_changes (reject and request_changes need a reason)."),
 ]
+TOOLS = {"submitter": SUBMITTER_TOOLS, "reviewer": REVIEWER_TOOLS, "both": SUBMITTER_TOOLS + REVIEWER_TOOLS}
 
 
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}

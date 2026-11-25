@@ -63,7 +63,7 @@ export const KIND_INFO: Record<string, KindInfo> = {
   },
   jira: {
     title: "Jira",
-    blurb: "Decisions on linked submissions comment on the ticket, move it and attach the evidence pack. With a JQL query, matching tickets are submitted automatically.",
+    blurb: "Decisions on linked submissions comment on the ticket, move it and attach the review record. With a JQL query, matching tickets are submitted automatically.",
     fields: [
       { key: "base_url", label: "Jira site URL", type: "url", placeholder: "https://your-company.atlassian.net" },
       { key: "email", label: "Account email", type: "text", placeholder: "review-bot@example.com" },
@@ -81,7 +81,7 @@ export const KIND_INFO: Record<string, KindInfo> = {
   },
   azure_devops: {
     title: "Azure DevOps",
-    blurb: "Decisions on linked work items add a history entry, move the item and attach the evidence pack. With a WIQL query, matching work items are submitted automatically.",
+    blurb: "Decisions on linked work items add a history entry, move the item and attach the review record. With a WIQL query, matching work items are submitted automatically.",
     fields: [
       { key: "organization", label: "Organization", type: "text", placeholder: "contoso" },
       { key: "project", label: "Project", type: "text", placeholder: "Legal" },

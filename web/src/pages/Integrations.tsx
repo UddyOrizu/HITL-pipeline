@@ -8,9 +8,9 @@ import type { SourceApp } from "../components/integrations/types";
 import "./admin.css";
 
 const TABS = [
-  { key: "apps", label: "Source applications" },
+  { key: "apps", label: "Apps" },
   { key: "connectors", label: "Connectors" },
-  { key: "deliveries", label: "Delivery log" },
+  { key: "deliveries", label: "Delivery history" },
 ] as const;
 
 type Tab = (typeof TABS)[number]["key"];
@@ -25,12 +25,12 @@ export default function Integrations() {
     <div className="admin-page">
       <div className="page-head">
         <div>
-          <h1>Integrations console</h1>
-          <div className="sub">Source applications, API keys, webhooks and connectors.</div>
+          <h1>Connected apps</h1>
+          <div className="sub">The apps and tools that send work here for review, and where the results are sent back.</div>
         </div>
       </div>
 
-      <div className="tabs" role="tablist" aria-label="Integrations">
+      <div className="tabs" role="tablist" aria-label="Connected apps">
         {TABS.map((t) => (
           <button key={t.key} role="tab" id={`tab-${t.key}`} aria-controls={`panel-${t.key}`} aria-selected={tab === t.key}
             onClick={() => setParams(t.key === "apps" ? {} : { tab: t.key }, { replace: true })}>

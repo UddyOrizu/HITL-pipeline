@@ -234,15 +234,65 @@ def test_workflow_can_limit_which_channels_may_decide(client):
     assert r.status_code == 200 and r.json()["decision"]["channel"] == "ui"
 
 
-def test_one_mcp_server_cannot_both_submit_and_approve(monkeypatch):
+def test_one_mcp_server_never_holds_two_credentials(monkeypatch):
     from mcp_server import server
 
+    monkeypatch.delenv("POR_MCP_REVIEW_WITH_API_KEY", raising=False)
     monkeypatch.setenv("POR_MCP_API_KEY", "por_x")
     monkeypatch.setenv("POR_MCP_REVIEWER_TOKEN", "t")
     with pytest.raises(SystemExit):
         server.mode()
     monkeypatch.delenv("POR_MCP_API_KEY")
     assert server.mode() == "reviewer"
+    monkeypatch.delenv("POR_MCP_REVIEWER_TOKEN")
+    monkeypatch.setenv("POR_MCP_API_KEY", "por_x")
+    assert server.mode() == "submitter"  # a source app key alone never offers the review tools
+    monkeypatch.setenv("POR_MCP_REVIEW_WITH_API_KEY", "true")
+    assert server.mode() == "both"
+
+
+async def test_one_source_app_key_can_submit_and_review_once_allowed(client, sink, mcp_clients):
+    from mcp_server import tools
+    from mcp_server.server import build
+
+    world = make_tenant(reviewers=1)
+    key, owner = {"X-API-Key": world["api_key"]}, auth(world["users"]["owner"]["token"])
+    reviewer_id = world["users"]["r1"]["id"]
+    # Off by default: a source app key is refused on every review endpoint.
+    assert client.get("/v1/review/queue", headers=key).status_code == 403
+    # Only an active reviewer can be chosen, and only by an integration owner.
+    url = f"/v1/integrations/apps/{world['app_id']}"
+    assert client.patch(url, json={"review_as_user_id": world["users"]["sub"]["id"]}, headers=owner).status_code == 422
+    assert client.patch(url, json={"review_as_user_id": reviewer_id}, headers=auth(world["users"]["r1"]["token"])).status_code == 403
+    assert client.patch(url, json={"review_as_user_id": reviewer_id}, headers=owner).json()["review_as_user_id"] == reviewer_id
+
+    server = build("both")
+    assert len(await server.list_tools()) == 9
+    mcp_clients(app_key=world["api_key"])
+    tools.set_reviewer_client_factory(tools._factory)  # what POR_MCP_REVIEW_WITH_API_KEY does: the same key for both
+    sub = await tools.submit_for_review(world["workflow_id"], content=TEXT, external_ref="both-1")
+    task = (await tools.list_review_tasks())[0]
+    assert task["submission_id"] == sub["submission_id"]
+    opened = await tools.open_review_task(task["task_id"])
+    for flag_id in opened["must_acknowledge_before_approving"]:
+        await tools.acknowledge_flag(task["task_id"], flag_id)
+    r = await tools.submit_review_decision(task["task_id"], "approve", confirm_warnings=True)
+    assert r["status"] == "recorded" and r["decision"]["channel"] == "mcp"
+    assert (await tools.get_review_status(sub["submission_id"]))["status"] == "approved"
+
+    # The decision is recorded under the reviewer account, and the audit log says a source app key made it.
+    from db.models import AuditEvent, ReviewTask
+    from db.session import session_scope
+
+    with session_scope() as db:
+        assert db.get(ReviewTask, task["task_id"]).reviewer_id == reviewer_id
+        note = db.scalars(select(AuditEvent).where(AuditEvent.action == "decision.made_with_app_key",
+                                                   AuditEvent.entity_id == task["task_id"])).one()
+        assert note.actor == f"app:{world['app_id']}" and note.payload["review_as_user_id"] == reviewer_id
+
+    # Turning it off ends the key's review access at once.
+    assert client.patch(url, json={"review_as_user_id": None}, headers=owner).json()["review_as_user_id"] is None
+    assert client.get("/v1/review/queue", headers=key).status_code == 403
 
 
 def test_submitter_sees_decision_and_evidence_pack_in_portal(client, sink):

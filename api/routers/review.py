@@ -6,15 +6,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from api.deps import UserPrincipal, get_db, request_channel, require_roles
+from api.deps import UserPrincipal, get_db, request_channel, require_reviewer
 from api.pagination import Page, set_headers
 from db.models import ReviewTask
-from services import review, telemetry
+from services import audit, review, telemetry
 from services.review import ReviewError
 
 router = APIRouter(prefix="/v1", tags=["reviewer"])
 
-reviewer = require_roles("reviewer")
+reviewer = require_reviewer  # a reviewer's own token, or a source app key allowed to review as a reviewer
 
 STATUS = {"not_found": 404, "conflict": 409, "mandatory_flags": 409, "confirm_required": 409,
           "below_review_standard": 409, "channel_not_allowed": 403, "invalid": 422}
@@ -129,6 +129,10 @@ def decide(task_id: str, body: DecisionIn, request: Request, p: UserPrincipal = 
     except ReviewError as exc:
         db.rollback()
         _raise(exc)
+    app_id = getattr(request.state, "review_app_id", None)
+    if app_id:  # made with a source app key, not the reviewer's own sign-in: keep that on the record
+        audit.record(db, p.tenant_id, f"app:{app_id}", "decision.made_with_app_key", "review_task", task_id,
+                     {"source_app_id": app_id, "review_as_user_id": p.user.id, "outcome": body.outcome})
     db.commit()
     return result
 

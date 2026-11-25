@@ -1,7 +1,17 @@
+// One key that can sign in as the app. Only the first characters are ever listed; the key itself is shown once.
+export type AppKey = {
+  id: string; name: string; prefix: string; original: boolean; created_at: string | null;
+  last_used_at: string | null; expires_at: string | null; expired: boolean;
+};
+
 export type SourceApp = {
   id: string; name: string; api_key_prefix: string; webhook_url: string | null; oauth_client_id: string | null;
   oauth_enabled: boolean; active: boolean; previous_key_valid_until: string | null; created_at: string;
+  keys: AppKey[];
 };
+
+// Returned once when a key is created.
+export type NewKey = AppKey & { api_key: string };
 
 // Returned once by create / rotate calls.
 export type AppSecrets = SourceApp & { api_key?: string; webhook_secret?: string; oauth_client_secret?: string | null };

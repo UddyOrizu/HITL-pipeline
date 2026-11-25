@@ -42,7 +42,7 @@ const TABS = [
 
 const DIMENSIONS = [
   { id: "by_workflow", name: "Workflow" },
-  { id: "by_source_app", name: "Source app" },
+  { id: "by_source_app", name: "Connected app" },
   { id: "by_risk_tier", name: "Risk tier" },
   { id: "by_origin", name: "Content origin" },
 ] as const;
@@ -101,7 +101,7 @@ export default function Reports() {
       <div className="page-head">
         <div>
           <h1>Reports</h1>
-          <div className="sub">Throughput, turnaround, outcomes and SLAs{lead ? ", with reviewer performance" : ""}. Dates are UTC.</div>
+          <div className="sub">How much was reviewed, how long it took, the outcomes and deadlines met{lead ? ", with reviewer performance" : ""}. Dates are UTC.</div>
         </div>
         <div className="rp-head-actions">
           <button type="button" className="btn" onClick={exportCsv} disabled={exporting || (tab !== "sla" && !!invalid) || (tab === "sla" && !sla.data?.overdue.length)}>
@@ -125,7 +125,7 @@ export default function Reports() {
         </ReportFilters>
       )}
       {tab === "reviewers" && (f.workflow_id || f.source_app_id) && (
-        <div className="rp-info">The reviewer report covers all workflows and source apps; only the date range applies.</div>
+        <div className="rp-info">The reviewer report covers all workflows and connected apps; only the date range applies.</div>
       )}
       <ErrorBox error={exportError} />
 
@@ -187,7 +187,7 @@ function OverviewTab({ state, interval }: { state: LoadState<Overview | null>; i
         <Stat label="SLA breach rate" value={pct(k.sla_breach_rate)} hint={`${count(k.sla_breaches)} of ${count(k.sla_tasks_due)} tasks due in range`} />
         <Stat label="Escalated" value={count(k.escalated)} hint="Received in range and escalated" />
         <Stat label="Held now" value={count(k.held_now)} hint="Currently held, whenever received" />
-        <Stat label="Median assurance score" value={k.median_score == null ? "–" : num(k.median_score, 1)} hint={`${count(k.below_threshold)} decided below threshold`} />
+        <Stat label="Typical review quality score" value={k.median_score == null ? "–" : num(k.median_score, 1)} hint={`${count(k.below_threshold)} decided below the minimum score`} />
       </div>
 
       {quiet ? (
@@ -235,11 +235,11 @@ function OverviewTab({ state, interval }: { state: LoadState<Overview | null>; i
               </ChartFrame>
             </div>
             <div className="card">
-              <ChartFrame title="Held items by reason" loading={loading}
+              <ChartFrame title="Work on hold, by reason" loading={loading}
                 subtitle="Items held now, matching the workflow and source-app filters"
                 empty={data.held_by_reason.length ? undefined : "Nothing is held."}
                 table={{ columns: ["Reason", "Items"], rows: data.held_by_reason.map((h) => [label(h.key) || "No reason", h.count]) }}>
-                <BarChart label="Held items by reason" format={count}
+                <BarChart label="Work on hold, by reason" format={count}
                   series={[{ key: "n", label: "Items", color: "var(--viz-1)" }]}
                   rows={data.held_by_reason.map((h) => ({ key: h.key || "none", label: label(h.key) || "No reason", values: { n: h.count } }))} />
               </ChartFrame>
@@ -315,9 +315,9 @@ const REVIEWER_COLUMNS: Column<ReviewerRow>[] = [
   { key: "mean_coverage", label: "Coverage", numeric: true, value: (r) => r.mean_coverage, hint: "Mean share of the content viewed", render: (r) => ratio(r.mean_coverage) },
   { key: "flag_engagement", label: "Flag engagement", numeric: true, value: (r) => r.flag_engagement, hint: "Mean share of flags looked at", render: (r) => ratio(r.flag_engagement) },
   { key: "warnings_confirmed", label: "Warnings confirmed", numeric: true, value: (r) => r.warnings_confirmed },
-  { key: "canaries_scored", label: "Canaries", numeric: true, value: (r) => r.canaries_scored, hint: "Canaries scored in range" },
-  { key: "catch_rate", label: "Catch rate", numeric: true, value: (r) => r.catch_rate, hint: "Share of canaries caught", render: (r) => ratio(r.catch_rate) },
-  { key: "spot_check_disagreements", label: "Spot-check disagreements", numeric: true, value: (r) => r.spot_check_disagreements, hint: "Spot checks that reached a different outcome" },
+  { key: "canaries_scored", label: "Planted mistakes", numeric: true, value: (r) => r.canaries_scored, hint: "Planted mistakes checked in this period" },
+  { key: "catch_rate", label: "Mistakes caught", numeric: true, value: (r) => r.catch_rate, hint: "Share of planted mistakes spotted", render: (r) => ratio(r.catch_rate) },
+  { key: "spot_check_disagreements", label: "Spot check disagreements", numeric: true, value: (r) => r.spot_check_disagreements, hint: "Spot checks that reached a different outcome" },
   { key: "sla_breaches", label: "SLA breaches", numeric: true, value: (r) => r.sla_breaches },
   { key: "open_tasks", label: "Open", numeric: true, value: (r) => r.open_tasks, hint: "Assigned now" },
   { key: "overdue_tasks", label: "Overdue", numeric: true, value: (r) => r.overdue_tasks, hint: "Assigned now and past due",
@@ -338,7 +338,7 @@ function ReviewersTab({ state }: { state: LoadState<{ rows: ReviewerRow[] } | nu
       <div className="rp-card-head">
         <div>
           <h2>Reviewer performance</h2>
-          <div className="sub rp-small">Active reviewers, plus anyone who recorded a decision in range. Telemetry measures apply to web-app decisions only.</div>
+          <div className="sub rp-small">Active reviewers, plus anyone who recorded a decision in range. Reading measures only apply to decisions made in this app.</div>
         </div>
       </div>
       {data.rows.length === 0

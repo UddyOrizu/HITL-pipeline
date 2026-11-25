@@ -11,9 +11,15 @@ Usage (from the repo root, with Python 3.11 or newer, which the app itself needs
     python run.py migrate
     python run.py seed
 
-Apps: api (FastAPI on :8000), worker (background jobs), web (Vite on :5173), mcp (MCP over HTTP on :8001).
-With no APP, every app is used. mcp starts only when it has a credential: POR_MCP_API_KEY or
-POR_MCP_REVIEWER_TOKEN in the environment or .env, or the demo API key written by `seed`.
+Apps: db (Postgres in Docker on :5432), api (FastAPI on :8000), worker (background jobs), web (Vite on :5173),
+mcp (MCP over HTTP on :8001). With no APP, every app is used. mcp starts only when it has a credential:
+POR_MCP_API_KEY or POR_MCP_REVIEWER_TOKEN in the environment or .env, or the demo API key written by `seed`.
+
+The database is the `postgres` service from infra/docker-compose.dev.yml, so Docker must be running. Migrations run
+as its owner (por) and the apps connect as por_app, which is not a superuser, so row-level security applies.
+Set POR_DATABASE_URL in .env to use another database instead (your own Postgres server, or a sqlite:/// file);
+this script then leaves Docker alone. With your own Postgres, POR_MIGRATION_DATABASE_URL can name the owner
+that migrations run as, and the apps' role in POR_DATABASE_URL is then created for you.
 
 Apps run in the background and keep running after this script exits. Logs go to var/logs/<app>.log
 (the previous run's log is kept as <app>.log.1) and process ids to var/run/<app>.json.
@@ -32,6 +38,7 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -45,7 +52,14 @@ VENV = ROOT / ".venv"
 WEB = ROOT / "web"
 IS_WINDOWS = os.name == "nt"
 
-API_PORT, WEB_PORT, MCP_PORT = 8000, 5173, 8001
+API_PORT, WEB_PORT, MCP_PORT, DB_PORT = 8000, 5173, 8001, 5432
+
+# The local database: the postgres service in infra/docker-compose.dev.yml, published on localhost.
+# LOCAL_APP_DB_URL is also the default of POR_DATABASE_URL in services/config.py; keep the two the same.
+COMPOSE_FILE = ROOT / "infra" / "docker-compose.dev.yml"
+DB_SERVICE = "postgres"
+LOCAL_APP_DB_URL = f"postgresql+psycopg://por_app:por_app@127.0.0.1:{DB_PORT}/por"
+LOCAL_OWNER_DB_URL = f"postgresql+psycopg://por:por@127.0.0.1:{DB_PORT}/por"
 
 
 @dataclass
@@ -70,7 +84,8 @@ APPS: dict[str, App] = {
     "mcp": App("mcp", "MCP server, streamable HTTP", MCP_PORT, f"http://localhost:{MCP_PORT}/mcp",
                env={"POR_MCP_PORT": str(MCP_PORT), "POR_MCP_API_URL": f"http://localhost:{API_PORT}"}),
 }
-ORDER = ["api", "worker", "mcp", "web"]  # start order; stop runs in reverse
+DB = "db"  # not a process this script owns: the Postgres container, run through docker compose
+ORDER = [DB, "api", "worker", "mcp", "web"]  # start order; stop runs in reverse
 
 # --- Output -------------------------------------------------------------------------------
 
@@ -188,18 +203,105 @@ def ensure_web_env() -> None:
     run_step([npm(), "install", "--no-audit", "--no-fund"], cwd=WEB)
 
 
+# --- Database -----------------------------------------------------------------------------
+
+
+def database_url() -> str:
+    """The database the apps connect to."""
+    return base_env().get("POR_DATABASE_URL") or LOCAL_APP_DB_URL
+
+
+def uses_local_container() -> bool:
+    """True when the apps use the Postgres container this script manages (the default)."""
+    return database_url() == LOCAL_APP_DB_URL
+
+
+def migration_url() -> str:
+    """The database URL migrations run with: the owner's, which may differ from the apps' role."""
+    override = base_env().get("POR_MIGRATION_DATABASE_URL")
+    return override or (LOCAL_OWNER_DB_URL if uses_local_container() else database_url())
+
+
+def compose_cmd(*args: str) -> list[str] | None:
+    docker = shutil.which("docker")
+    return [docker, "compose", "-f", str(COMPOSE_FILE), *args] if docker else None
+
+
+def database_running() -> bool:
+    cmd = compose_cmd("ps", "--status", "running", "-q", DB_SERVICE)
+    if cmd is None:
+        return False
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
+def ensure_database() -> None:
+    """Start the Postgres container and wait until it accepts connections. Does nothing for another database."""
+    if not uses_local_container() or database_running():
+        return
+    other = "or set POR_DATABASE_URL in .env to use another database"
+    docker = shutil.which("docker")
+    if not docker:
+        fail(f"Docker was not found on PATH. The local database runs in Docker: install Docker Desktop, {other}.")
+    if subprocess.run([docker, "info"], capture_output=True).returncode != 0:
+        fail(f"Docker is installed but not running. Start Docker Desktop and try again, {other}.")
+    if port_open(DB_PORT):
+        fail(f"port {DB_PORT} is already in use by another program (perhaps a PostgreSQL installed on this machine), "
+             f"so the database container cannot start. Stop that program, {other}.")
+    info(f"Starting the Postgres container on localhost:{DB_PORT}")
+    run_step(compose_cmd("up", "-d", "--wait", DB_SERVICE))
+
+
+def stop_database() -> None:
+    if not uses_local_container():
+        print(f"    {DB} is not managed by this script (POR_DATABASE_URL points elsewhere)")
+        return
+    if not database_running():
+        print(f"    {DB} is not running")
+        return
+    subprocess.run(compose_cmd("stop", DB_SERVICE), capture_output=True)
+    print(f"    stopped {DB} (the data is kept in the Docker volume)")
+
+
 def migrate() -> None:
-    url = base_env().get("POR_DATABASE_URL", "sqlite:///./var/por.db")
+    url, app_url = migration_url(), database_url()
     if url.startswith("sqlite") and ":///" in url and not url.endswith(":memory:"):
         # Alembic opens SQLite directly and, unlike the app, does not create the folder.
         (ROOT / url.split(":///", 1)[1]).parent.mkdir(parents=True, exist_ok=True)
+    ensure_database()
     info("Applying database migrations (alembic upgrade head)")
-    run_step([venv_python(), "-m", "alembic", "upgrade", "head"])
+    env = {**base_env(), "POR_DATABASE_URL": url}
+    run_step([venv_python(), "-m", "alembic", "upgrade", "head"], env=env)
+    if app_url != url and app_url.startswith("postgresql"):
+        # Migrations ran as the owner. The apps connect as their own role, which is not a superuser.
+        parts = urllib.parse.urlsplit(app_url)
+        if parts.username and parts.password:
+            info(f"Checking the apps' database role ({parts.username})")
+            run_step([venv_python(), "-m", "scripts.db_app_role"],
+                     env={**env, "POR_APP_DB_USER": urllib.parse.unquote(parts.username),
+                          "POR_APP_DB_PASSWORD": urllib.parse.unquote(parts.password)})
+
+
+def demo_seeded() -> bool:
+    """True when the demo tenant recorded in var/seed/demo.json exists in the database in use now."""
+    try:
+        tenant_id = json.loads(SEED_INFO.read_text()).get("tenant_id")
+    except (OSError, ValueError):
+        return False
+    if not tenant_id:
+        return False
+    code = ("import sys\nfrom db.models import Tenant\nfrom db.session import session_scope\n"
+            "with session_scope() as s:\n    sys.exit(0 if s.get(Tenant, sys.argv[1]) else 1)\n")
+    result = subprocess.run([str(venv_python()), "-c", code, tenant_id], cwd=ROOT, env=base_env(), capture_output=True)
+    return result.returncode == 0
 
 
 def seed() -> None:
-    if SEED_INFO.exists():
-        info(f"Demo data already seeded ({SEED_INFO.relative_to(ROOT).as_posix()} exists), skipping")
+    if demo_seeded():
+        info("Demo data already seeded in this database, skipping")
         return
     info("Seeding the demo tenant and submitting sample files")
     run_step([venv_python(), "-m", "scripts.seed", "--submit"])
@@ -462,16 +564,16 @@ def show_logs(names: list[str], follow: bool, lines: int) -> None:
 
 
 def selected(names: list[str] | None) -> list[str]:
-    unknown = [n for n in names or [] if n not in APPS]
+    unknown = [n for n in names or [] if n not in ORDER]
     if unknown:
         fail(f"unknown app: {', '.join(unknown)} (choose from {', '.join(ORDER)})")
-    chosen = set(names or APPS)
+    chosen = set(names or ORDER)
     return [n for n in ORDER if n in chosen]
 
 
 def cmd_up(args) -> None:
-    names = selected(args.apps)
     explicit = set(args.apps or [])
+    names = [n for n in selected(args.apps) if n != DB]
     py_apps = [n for n in names if n != "web"]
     if not args.no_install:
         if py_apps or args.seed:
@@ -480,7 +582,10 @@ def cmd_up(args) -> None:
             ensure_web_env()
     if not venv_python().exists() and (py_apps or args.seed):
         fail(".venv does not exist; run without --no-install first")
-    if not args.no_migrate and any(APPS[n].needs_db for n in names):
+    needs_db = any(APPS[n].needs_db for n in names)
+    if DB in explicit or needs_db or args.seed:
+        ensure_database()
+    if not args.no_migrate and needs_db:
         migrate()
     if args.seed:
         seed()
@@ -521,10 +626,15 @@ def cmd_up(args) -> None:
 def cmd_down(args) -> None:
     info("Stopping apps")
     for name in reversed(selected(args.apps)):
-        stop(name)
+        if name == DB:
+            stop_database()
+        else:
+            stop(name)
 
 
 def cmd_restart(args) -> None:
+    if not args.apps:
+        args.apps = [n for n in ORDER if n != DB]  # the database keeps running unless it is named
     cmd_down(args)
     args.no_migrate = args.no_install = True
     args.seed = args.follow = False
@@ -533,7 +643,14 @@ def cmd_restart(args) -> None:
 
 def cmd_status(_args) -> None:
     print(f"{'APP':<8} {'STATE':<10} {'PID':<8} {'URL':<32} LOG")
-    for name in ORDER:
+    if uses_local_container():
+        state, code = ("running", "32") if database_running() else ("stopped", "2")
+        where, log = f"127.0.0.1:{DB_PORT} (Docker)", f"python run.py logs {DB}"
+    else:
+        state, code = "external", "2"
+        where, log = database_url().split(":", 1)[0] + ", from POR_DATABASE_URL", "-"
+    print(f"{DB:<8} {paint(f'{state:<10}', code)} {'-':<8} {where:<32} {log}")
+    for name in ORDER[1:]:
         app = APPS[name]
         pid = running_pid(name)
         if pid is None:
@@ -547,7 +664,19 @@ def cmd_status(_args) -> None:
 
 
 def cmd_logs(args) -> None:
-    show_logs(selected(args.apps), args.follow, args.lines)
+    names = [n for n in selected(args.apps) if n != DB]
+    if DB in (args.apps or []):
+        # The container's log comes from Docker, and only when asked for by name.
+        follow = ["-f"] if args.follow and not names else []
+        cmd = compose_cmd("logs", "--tail", str(args.lines), *follow, DB_SERVICE)
+        if cmd is None:
+            fail("Docker was not found on PATH")
+        try:
+            subprocess.run(cmd)
+        except KeyboardInterrupt:
+            print()
+    if names:
+        show_logs(names, args.follow, args.lines)
 
 
 def cmd_migrate(args) -> None:
@@ -566,7 +695,7 @@ def cmd_seed(args) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Run the Proof of Review stack locally.",
-        epilog=f"Apps: {', '.join(f'{n} ({APPS[n].description})' for n in ORDER)}",
+        epilog=f"Apps: {DB} (Postgres container), {', '.join(f'{n} ({APPS[n].description})' for n in ORDER[1:])}",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 

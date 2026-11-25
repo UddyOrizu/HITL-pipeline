@@ -125,13 +125,13 @@ function Editor({ wf, teams, apps, onDone, onCancel }: {
       <button className="btn small" onClick={() => set(["stages"], [...f.stages, { name: `Stage ${f.stages.length + 1}`, team_id: null, sla_hours: 24, on_sla_breach: "escalate" }])}>Add stage</button>
 
       <div className="field-row">
-        <div><label>Canary rate (0–1)</label><NumberInput step="0.01" min={0} placeholder="Default 0.05" value={f.canary_rate} onChange={(v) => set(["canary_rate"], v)} /></div>
-        <div><label>Canary domain</label>
+        <div><label>Share of work given a planted mistake (0–1)</label><NumberInput step="0.01" min={0} placeholder="Default 0.05" value={f.canary_rate} onChange={(v) => set(["canary_rate"], v)} /></div>
+        <div><label>Subject area for planted mistakes</label>
           <select value={f.canary_domain} onChange={(e) => set(["canary_domain"], e.target.value)}>
             {["general", "financial", "insurance", "professional_services", "legal"].map((d) => <option key={d} value={d}>{label(d)}</option>)}
           </select></div>
-        <div><label>Spot-check rate (0–1)</label><NumberInput step="0.01" min={0} placeholder="Default 0.05" value={f.spot_check_rate} onChange={(v) => set(["spot_check_rate"], v)} /></div>
-        <div><label>Spot-check team</label>
+        <div><label>Spot check rate (0–1)</label><NumberInput step="0.01" min={0} placeholder="Default 0.05" value={f.spot_check_rate} onChange={(v) => set(["spot_check_rate"], v)} /></div>
+        <div><label>Spot check team</label>
           <select value={f.risk_policy.spot_check_team_id || ""} onChange={(e) => set(["risk_policy", "spot_check_team_id"], e.target.value || null)}>
             <option value="">Any eligible reviewer</option>
             {teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
@@ -173,7 +173,7 @@ function Editor({ wf, teams, apps, onDone, onCancel }: {
         })}
       </div>
       <p className="sub" style={{ fontSize: 12, marginTop: 4 }}>
-        Only the web workspace measures reading. API and MCP decisions have no reading telemetry, so the standard above applies to them.
+        Only the web workspace measures reading. Decisions made through the API or MCP have no reading activity recorded, so the standard above applies to them.
       </p>
       <div className="field-row">
         <div><label>Daily cap (review minutes)</label><NumberInput min={0} placeholder="Default 240" value={f.cap_policy.daily_minutes} onChange={(v) => set(["cap_policy", "daily_minutes"], v)} /></div>
@@ -191,16 +191,16 @@ function Editor({ wf, teams, apps, onDone, onCancel }: {
         <div><label>Max consecutive from one source</label><NumberInput min={0} placeholder="Default 3" value={f.cap_policy.max_consecutive_same_source} onChange={(v) => set(["cap_policy", "max_consecutive_same_source"], v)} /></div>
       </div>
       <div className="field-row">
-        <div><label>Minimum assurance score</label><NumberInput min={0} placeholder="Default 60" value={f.assurance_policy.min_score} onChange={(v) => set(["assurance_policy", "min_score"], v)} /></div>
+        <div><label>Minimum review quality score</label><NumberInput min={0} placeholder="Default 60" value={f.assurance_policy.min_score} onChange={(v) => set(["assurance_policy", "min_score"], v)} /></div>
         <div><label>Below minimum score</label>
           <select value={f.assurance_policy.below_action || "release_flag"} onChange={(e) => set(["assurance_policy", "below_action"], e.target.value)}>
             <option value="release_flag">Release with a flag</option><option value="second_review">Require a second review</option><option value="block">Block release</option>
           </select></div>
       </div>
 
-      <label>Source applications that can use this workflow</label>
-      {!apps.length ? <p className="sub">No source applications yet.</p> : (
-        <div className="pill-list" style={{ marginTop: 0 }} role="group" aria-label="Allowed source applications">
+      <label>Connected apps that can use this workflow</label>
+      {!apps.length ? <p className="sub">No connected apps yet.</p> : (
+        <div className="pill-list" style={{ marginTop: 0 }} role="group" aria-label="Allowed connected apps">
           <button type="button" className={!appIds.length ? "on" : ""} aria-pressed={!appIds.length} onClick={() => set(["source_app_ids"], [])}>
             {!appIds.length ? "✓ " : ""}All applications
           </button>
@@ -231,8 +231,8 @@ function Editor({ wf, teams, apps, onDone, onCancel }: {
 // --- Version history ------------------------------------------------------------------------------------------
 
 const FIELD_NAME: Record<string, string> = {
-  name: "name", canary_rate: "canary rate", canary_domain: "canary domain", spot_check_rate: "spot-check rate",
-  source_app_ids: "source apps", stages: "stages",
+  name: "name", canary_rate: "planted mistake rate", canary_domain: "planted mistake subject area", spot_check_rate: "spot check rate",
+  source_app_ids: "connected apps", stages: "stages",
 };
 
 const same = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
@@ -264,7 +264,7 @@ function summarize(prev: WF | undefined, w: WF, teamName: (id: string) => string
     }
   }
   if (!same(prev.source_app_ids, w.source_app_ids)) {
-    out.push(`source apps ${prev.source_app_ids?.length || "all"} → ${w.source_app_ids?.length || "all"}`);
+    out.push(`connected apps ${prev.source_app_ids?.length || "all"} → ${w.source_app_ids?.length || "all"}`);
   }
   return out.length ? out.join("; ") : "Saved with no changes";
 }
@@ -272,7 +272,7 @@ function summarize(prev: WF | undefined, w: WF, teamName: (id: string) => string
 function History({ wf, teams }: { wf: WF; teams: Team[] }) {
   const { data, error, loading } = useLoad(
     () => api<WF[]>(`/v1/admin/workflows${qs({ include_history: true, family_id: wf.id })}`), [wf.id, wf.version]);
-  // Who saved each version comes from the audit log; it's optional (needs auditor or oversight access).
+  // Who saved each version comes from the activity log; it's optional (needs auditor or oversight access).
   const { data: events } = useLoad(
     () => api<{ actor: string; payload: any }[]>(`/v1/audit/events${qs({ entity: "workflow", entity_id: wf.id, order: "desc", limit: 200 })}`)
       .catch(() => []), [wf.id, wf.version]);
@@ -314,8 +314,8 @@ export default function Workflows() {
     <>
       <div className="page-head">
         <div>
-          <h1>Workflow settings</h1>
-          <div className="sub">Every save creates a new version. Submissions keep the version they arrived under.</div>
+          <h1>Review workflows</h1>
+          <div className="sub">A workflow sets how one kind of work is reviewed: who reviews it, how quickly, and which checks apply. Every save creates a new version; work already sent keeps the version it arrived under.</div>
         </div>
         <button className="btn primary" onClick={() => { setMsg(""); setEditing(BLANK); }}>New workflow</button>
       </div>
@@ -328,7 +328,7 @@ export default function Workflows() {
       <div className="card" style={{ padding: 0, overflowX: "auto" }}>
         {loading && !data ? <Empty>Loading…</Empty> : !data?.length ? <Empty>No workflows yet.</Empty> : (
           <table>
-            <thead><tr><th>Workflow</th><th>Stages</th><th>Canaries</th><th>Spot-checks</th><th>Mandatory flags</th><th>Caps</th><th>Min score</th><th>Apps</th><th>Updated</th><th /></tr></thead>
+            <thead><tr><th>Workflow</th><th>Stages</th><th>Planted mistakes</th><th>Spot checks</th><th>Must-check warnings</th><th>Limits</th><th>Min score</th><th>Apps</th><th>Updated</th><th /></tr></thead>
             <tbody>
               {data.map((w) => (
                 <Fragment key={w.id}>

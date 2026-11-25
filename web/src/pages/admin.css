@@ -66,6 +66,13 @@
 .admin-page .app-card-head h3 { font-size: 15px; margin: 0 0 2px; }
 .admin-page .app-card-head .mono .btn { margin-left: 6px; vertical-align: middle; }
 .admin-page .app-card .kv { margin: 0 0 12px; }
+.admin-page .key-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 4px; }
+.admin-page .key-head h4 { margin: 0; font-size: 13px; }
+.admin-page .table-wrap { overflow-x: auto; margin: 6px 0 14px; border: 1px solid var(--border); border-radius: var(--radius); }
+.admin-page .key-table th, .admin-page .key-table td { padding: 6px 10px; font-size: 13px; vertical-align: middle; white-space: nowrap; }
+.admin-page .key-table td:first-child { white-space: normal; font-weight: 600; }
+.admin-page .key-table .key-actions { text-align: right; }
+.admin-page .choice-list legend { font-size: 12px; font-weight: 600; color: var(--muted); padding: 0; margin: 10px 0 4px; }
 .admin-page .app-actions { border-top: 1px solid var(--border); padding-top: 12px; }
 .admin-page .id-list { margin: 0 0 8px; padding-left: 18px; max-height: 200px; overflow: auto; }
 

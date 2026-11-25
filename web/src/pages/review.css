@@ -1,13 +1,13 @@
 /* Review workspace, my submissions and submit: styles local to these pages (tokens come from styles.css). */
 
 /* Keyboard focus on passages and flags: distinct from the solid "selected" outline. */
-.span:focus-visible { outline: 2px dashed var(--accent); outline-offset: 3px; }
-.span.selected:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+.span:focus-visible { outline: 2px dashed var(--info); outline-offset: 3px; }
+.span.selected:focus-visible { outline: 3px solid var(--info); outline-offset: 3px; }
 
 .flag-item .flag-open { border-radius: 6px; cursor: pointer; }
-.flag-item .flag-open:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
-.flag-item.active { border-color: var(--accent); }
-.flag-item:focus-within { border-color: var(--accent); }
+.flag-item .flag-open:focus-visible { outline: 2px solid var(--info); outline-offset: 3px; }
+.flag-item.active { border-color: var(--info); }
+.flag-item:focus-within { border-color: var(--info); }
 
 /* A button that looks like a text link. */
 .linklike { background: none; border: none; padding: 0; font: inherit; font-size: 12px; color: var(--accent); cursor: pointer; text-decoration: underline; }

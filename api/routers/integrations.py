@@ -7,12 +7,12 @@ from datetime import timedelta
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
 import connectors
 from api.deps import UserPrincipal, get_db, require_roles
 from api.pagination import Page, paginate
-from db.models import ConnectorConfig, SourceApp, WebhookDelivery, Workflow, utcnow
+from db.models import ConnectorConfig, SourceApp, SourceAppKey, User, WebhookDelivery, Workflow, utcnow
 from services import audit, netguard, secretbox, webhooks
 from services.security import generate_api_key, generate_secret, hash_secret
 
@@ -27,11 +27,35 @@ def _iso(dt) -> str | None:
     return dt.isoformat() + "Z" if dt else None
 
 
+MAX_KEYS_PER_APP = 20
+
+
+def key_out(k: SourceAppKey) -> dict:
+    return {"id": k.id, "name": k.name, "prefix": k.key_prefix, "original": False, "created_at": _iso(k.created_at),
+            "last_used_at": _iso(k.last_used_at), "expires_at": _iso(k.expires_at),
+            "expired": bool(k.expires_at and k.expires_at <= utcnow())}
+
+
+def _live_keys(db: Session, a: SourceApp) -> list[SourceAppKey]:
+    """Keys that have not been revoked (expired ones stay listed, marked, until someone removes them)."""
+    return list(db.scalars(select(SourceAppKey).where(SourceAppKey.source_app_id == a.id, SourceAppKey.revoked_at.is_(None))
+                           .order_by(SourceAppKey.created_at, SourceAppKey.id)).all())
+
+
+def app_keys(a: SourceApp) -> list[dict]:
+    """Every key that can sign in as this app: the original key first, then the extra ones. Never the key itself."""
+    db = object_session(a)
+    original = {"id": "original", "name": "Original key", "prefix": a.api_key_prefix, "original": True,
+                "created_at": _iso(a.created_at), "last_used_at": None, "expires_at": None, "expired": False}
+    return [original, *(key_out(k) for k in (_live_keys(db, a) if db is not None else []))]
+
+
 def app_out(a: SourceApp) -> dict:
     grace = a.previous_key_expires_at if a.previous_key_expires_at and a.previous_key_expires_at > utcnow() else None
     return {"id": a.id, "name": a.name, "api_key_prefix": a.api_key_prefix, "webhook_url": a.webhook_url,
             "oauth_client_id": a.oauth_client_id, "oauth_enabled": bool(a.oauth_client_id), "active": a.active,
-            "previous_key_valid_until": _iso(grace), "created_at": _iso(a.created_at)}
+            "previous_key_valid_until": _iso(grace), "created_at": _iso(a.created_at),
+            "review_as_user_id": a.review_as_user_id, "keys": app_keys(a)}
 
 
 def _check_webhook(url: str | None) -> str | None:
@@ -92,6 +116,9 @@ class AppPatch(BaseModel):
     name: str | None = Field(None, min_length=1, max_length=200)
     webhook_url: str | None = None  # null or "" removes the webhook
     active: bool | None = None
+    # A reviewer account this app's API key may review as (null turns it off). With it set, whoever holds the key
+    # can both submit work and decide it, so leave it off unless one client really must do both.
+    review_as_user_id: str | None = None
 
 
 NOT_NULLABLE = ("name", "active")
@@ -110,6 +137,10 @@ def update_app(app_id: str, body: AppPatch, p: UserPrincipal = Depends(owner), d
         changes["name"] = changes["name"].strip()
         if not changes["name"]:
             raise HTTPException(422, "name must not be blank")
+    if changes.get("review_as_user_id") is not None:
+        u = db.get(User, changes["review_as_user_id"])
+        if u is None or u.tenant_id != p.tenant_id or not u.active or "reviewer" not in (u.roles or []):
+            raise HTTPException(422, "review_as_user_id must be an active user with the reviewer role")
     for k, v in changes.items():
         setattr(a, k, v)
     audit.record(db, p.tenant_id, f"user:{p.user.id}", "source_app.updated", "source_app", a.id, changes)
@@ -143,6 +174,46 @@ def revoke_previous_key(app_id: str, p: UserPrincipal = Depends(owner), db: Sess
     a.previous_key_prefix = a.previous_key_hash = a.previous_key_expires_at = None
     audit.record(db, p.tenant_id, f"user:{p.user.id}", "source_app.previous_key_revoked", "source_app", a.id, {})
     return app_out(a)
+
+
+class KeyIn(BaseModel):
+    # What the key is for, so it can be told apart later ("Finance bot", "Sam's laptop").
+    name: str = Field(min_length=1, max_length=200)
+    # Days until the key stops working by itself. Leave out for a key that works until it is revoked.
+    expires_in_days: int | None = Field(None, ge=1, le=3650)
+
+
+@router.post("/apps/{app_id}/keys", status_code=201)
+def create_key(app_id: str, body: KeyIn, p: UserPrincipal = Depends(owner), db: Session = Depends(get_db)):
+    """Add another API key to the app. Keys already in use keep working. The key is returned once, here."""
+    a = _app(db, p, app_id)
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(422, "name must not be blank")
+    if len(_live_keys(db, a)) >= MAX_KEYS_PER_APP:
+        raise HTTPException(409, f"this app already has {MAX_KEYS_PER_APP} extra keys: revoke one you no longer use first")
+    key, prefix, key_hash = generate_api_key()
+    row = SourceAppKey(tenant_id=a.tenant_id, source_app_id=a.id, name=name, key_prefix=prefix, key_hash=key_hash,
+                       created_by=f"user:{p.user.id}",
+                       expires_at=utcnow() + timedelta(days=body.expires_in_days) if body.expires_in_days else None)
+    db.add(row)
+    db.flush()
+    audit.record(db, p.tenant_id, f"user:{p.user.id}", "source_app.key_created", "source_app", a.id,
+                 {"key_id": row.id, "name": name, "prefix": prefix, "expires_in_days": body.expires_in_days})
+    return {**key_out(row), "api_key": key, "app": app_out(a)}
+
+
+@router.delete("/apps/{app_id}/keys/{key_id}", status_code=204)
+def revoke_key(app_id: str, key_id: str, p: UserPrincipal = Depends(owner), db: Session = Depends(get_db)):
+    """Stop one extra key working at once. The app's other keys are not affected. (The original key is replaced
+    with rotate-key instead.)"""
+    a = _app(db, p, app_id)
+    row = db.get(SourceAppKey, key_id)
+    if row is None or row.source_app_id != a.id or row.tenant_id != p.tenant_id or row.revoked_at is not None:
+        raise HTTPException(404, "key not found")
+    row.revoked_at = utcnow()
+    audit.record(db, p.tenant_id, f"user:{p.user.id}", "source_app.key_revoked", "source_app", a.id,
+                 {"key_id": row.id, "name": row.name, "prefix": row.key_prefix})
 
 
 @router.post("/apps/{app_id}/rotate-webhook-secret")

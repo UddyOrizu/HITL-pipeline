@@ -31,7 +31,7 @@ export default function Tenants() {
     <div className="admin-page">
       <div className="page-head">
         <div>
-          <h1>Organisations</h1>
+          <h1>All organisations</h1>
           <div className="sub">Every organisation on this platform. Each has its own people, workflows, data and settings.</div>
         </div>
         <button className="btn primary" onClick={() => { msg.clear(); setCreating(true); }}>New organisation</button>
@@ -68,7 +68,7 @@ export default function Tenants() {
               <table>
                 <thead>
                   <tr><th>Organisation</th><th>Status</th><th>Admins</th><th className="num">People</th><th className="num">Submissions</th>
-                    <th className="num">Open tasks</th><th className="num">Source apps</th><th>SSO</th><th /></tr>
+                    <th className="num">Open tasks</th><th className="num">Connected apps</th><th>SSO</th><th /></tr>
                 </thead>
                 <tbody>
                   {list.map((o) => {
@@ -124,11 +124,11 @@ export default function Tenants() {
           {toggling.active ? (
             <>
               <p>Its {num(toggling.active_users)} {toggling.active_users === 1 ? "person" : "people"} can no longer sign in, and requests from its
-                {" "}{num(toggling.source_apps)} source app{toggling.source_apps === 1 ? "" : "s"} are refused at once.
+                {" "}{num(toggling.source_apps)} connected app{toggling.source_apps === 1 ? "" : "s"} are refused at once.
                 {toggling.open_tasks > 0 && <> {num(toggling.open_tasks)} open review task{toggling.open_tasks === 1 ? "" : "s"} will stop progressing.</>}</p>
               <p className="sub">Nothing is deleted: activate it again to restore access.</p>
             </>
-          ) : <p>Its people can sign in again and its source apps can make requests again.</p>}
+          ) : <p>Its people can sign in again and its connected apps can make requests again.</p>}
         </Confirm>
       )}
     </div>

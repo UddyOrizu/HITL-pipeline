@@ -86,9 +86,9 @@ export function ReportFilters({ value, onChange, options, children }: {
         </select>
       </div>
       <div>
-        <label htmlFor="rp-app">Source app</label>
+        <label htmlFor="rp-app">Connected app</label>
         <select id="rp-app" value={value.source_app_id} onChange={(e) => onChange({ source_app_id: e.target.value })}>
-          <option value="">All source apps</option>
+          <option value="">All connected apps</option>
           {options?.source_apps.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
         </select>
       </div>

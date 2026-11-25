@@ -17,7 +17,9 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="POR_", env_file=".env", extra="ignore")
 
     env: str = "dev"  # dev | test | prod
-    database_url: str = "sqlite:///./var/por.db"
+    # Postgres, as the apps' non-superuser role so row-level security applies. The default is the local container
+    # that run.py starts (the same value as LOCAL_APP_DB_URL there). A sqlite:/// URL still works for quick runs.
+    database_url: str = "postgresql+psycopg://por_app:por_app@127.0.0.1:5432/por"
     secret_key: str = DEFAULT_SECRET_KEY
     # Key for encrypting stored secrets (connector credentials, tenant SSO client secrets). Defaults to a key
     # derived from secret_key; set it separately so rotating one does not affect the other.

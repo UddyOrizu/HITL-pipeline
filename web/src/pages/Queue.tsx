@@ -16,11 +16,11 @@ export default function Queue({ kind }: { kind: "primary" | "spot_check" }) {
     <>
       <div className="page-head">
         <div>
-          <h1>{kind === "primary" ? "Review queue" : "Spot-checks"}</h1>
+          <h1>{kind === "primary" ? "To review" : "Spot checks"}</h1>
           <div className="sub">
             {kind === "primary"
-              ? "Items assigned to you, within your review budget for today."
-              : "Blind second reviews. You will not see the first reviewer's decision or comments."}
+              ? "Work assigned to you, sized to fit your review time for today."
+              : "A second, independent review. You won't see the first reviewer's decision or comments."}
           </div>
         </div>
         <button className="btn" onClick={reload}>Refresh</button>
@@ -30,12 +30,12 @@ export default function Queue({ kind }: { kind: "primary" | "spot_check" }) {
         {loading && !data ? (
           <Empty>Loading…</Empty>
         ) : !data?.length ? (
-          <Empty>Nothing waiting. New items appear here when they are assigned to you.</Empty>
+          <Empty>Nothing waiting. New work appears here when it is assigned to you.</Empty>
         ) : (
           <table>
             <thead>
               <tr>
-                <th>Item</th><th>Workflow · stage</th><th>Risk</th><th>Origin</th><th>Effort</th><th>Due</th>
+                <th>Item</th><th>Workflow · stage</th><th>Risk</th><th>Origin</th><th>Time needed</th><th>Due</th>
               </tr>
             </thead>
             <tbody>

@@ -80,8 +80,8 @@ export default function Submit() {
     <>
       <div className="page-head">
         <div>
-          <h1>Submit for review</h1>
-          <div className="sub">Send a document or text to a reviewer. You'll see the decision and evidence under My submissions.</div>
+          <h1>Send for review</h1>
+          <div className="sub">Send a document or text to a reviewer. You'll find the decision and the review record under Sent by me.</div>
         </div>
       </div>
       {revision && (

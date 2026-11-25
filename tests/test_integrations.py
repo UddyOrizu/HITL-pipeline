@@ -78,6 +78,50 @@ def test_webhook_gives_up_after_24_hours(client, sink):
     assert client.post(f"/v1/integrations/deliveries/{did}/redeliver", headers=owner).json()["status"] == "delivered"
 
 
+def test_app_can_have_several_keys_live_at_once(client):
+    world = make_tenant()
+    owner = auth(world["users"]["owner"]["token"])
+    created = client.post("/v1/integrations/apps", json={"name": "Drafting bot"}, headers=owner).json()
+    assert [k["original"] for k in created["keys"]] == [True]
+    keys = f"/v1/integrations/apps/{created['id']}/keys"
+
+    def works(key):
+        return client.get("/v1/workflows", headers={"X-API-Key": key}).status_code
+
+    one = client.post(keys, json={"name": "Finance bot"}, headers=owner)
+    assert one.status_code == 201
+    one = one.json()
+    two = client.post(keys, json={"name": "Laptop", "expires_in_days": 30}, headers=owner).json()
+    assert one["api_key"].startswith("por_") and one["api_key"] != two["api_key"] and two["expires_at"]
+    # All three keys work together, and the key itself is never listed again.
+    assert [works(created["api_key"]), works(one["api_key"]), works(two["api_key"])] == [200, 200, 200]
+    listed = client.get("/v1/integrations/apps", headers=owner).json()
+    listed = next(a for a in listed if a["id"] == created["id"])
+    assert [k["name"] for k in listed["keys"]] == ["Original key", "Finance bot", "Laptop"]
+    assert all("api_key" not in k for k in listed["keys"])
+    assert next(k for k in listed["keys"] if k["id"] == one["id"])["last_used_at"]
+
+    # Revoking one key leaves the others alone.
+    assert client.delete(f"{keys}/{one['id']}", headers=owner).status_code == 204
+    assert [works(created["api_key"]), works(one["api_key"]), works(two["api_key"])] == [200, 401, 200]
+    assert client.delete(f"{keys}/{one['id']}", headers=owner).status_code == 404
+    # Replacing the original key does not touch the extra ones.
+    client.post(f"/v1/integrations/apps/{created['id']}/rotate-key", json={"grace_hours": 0}, headers=owner)
+    assert [works(created["api_key"]), works(two["api_key"])] == [401, 200]
+    # An expired key stops working; a deactivated app refuses every key.
+    from db.models import SourceAppKey, utcnow
+    from db.session import new_session
+    with new_session() as db:
+        db.get(SourceAppKey, two["id"]).expires_at = utcnow()
+        db.commit()
+    assert works(two["api_key"]) == 401
+    three = client.post(keys, json={"name": "Third"}, headers=owner).json()
+    assert works(three["api_key"]) == 200
+    client.patch(f"/v1/integrations/apps/{created['id']}", json={"active": False}, headers=owner)
+    assert works(three["api_key"]) == 401
+    assert client.post(keys, json={"name": "  "}, headers=owner).status_code == 422
+
+
 def test_integrations_console_app_management(client):
     world = make_tenant()
     owner = auth(world["users"]["owner"]["token"])

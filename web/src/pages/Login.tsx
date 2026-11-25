@@ -5,17 +5,6 @@ import { useAuth } from "../auth";
 import { ErrorBox } from "../components/ui";
 import { startSso } from "./SsoCallback";
 
-const DEMO = [
-  { email: "admin@demo.test", role: "Admin" },
-  { email: "ada@demo.test", role: "Reviewer" },
-  { email: "ben@demo.test", role: "Reviewer" },
-  { email: "cara@demo.test", role: "Reviewer" },
-  { email: "sam@demo.test", role: "Submitter" },
-  { email: "olu@demo.test", role: "Oversight" },
-  { email: "aud@demo.test", role: "Auditor" },
-  { email: "ian@demo.test", role: "Integrations" },
-];
-
 type Methods = { password: boolean; password_reset: boolean; dev_login: boolean; sso: boolean; sso_needs_email: boolean };
 type Choice = { path: string; body: Record<string, unknown>; tenants: { id: string; name: string }[] };
 
@@ -144,7 +133,7 @@ export default function Login() {
                 )}
                 <button className="btn primary" style={{ marginTop: 10, width: "100%", justifyContent: "center" }}
                   onClick={sso} disabled={busy || ssoNeedsEmail}>
-                  Sign in with single sign-on
+                  Sign in with your work account
                 </button>
                 {methods.sso_needs_email && methods.password && (
                   <p className="sub" style={{ fontSize: 12 }}>Enter your work email below first, so we can find your organisation.</p>
@@ -171,25 +160,17 @@ export default function Login() {
               </form>
             )}
             {!methods.password && !methods.sso && !methods.dev_login && (
-              <p className="sub">No sign-in method is switched on. Ask your administrator.</p>
+              <p className="sub">Signing in isn't set up yet. Ask your administrator.</p>
             )}
             <ErrorBox error={error} />
             {methods.dev_login && (
               <>
-                <label style={{ marginTop: 20 }} htmlFor="dev-email">Local development: sign in by email, no password</label>
+                <label style={{ marginTop: 20 }} htmlFor="dev-email">Test mode: sign in with just your email</label>
                 <form onSubmit={(e) => (e.preventDefault(), go("/v1/auth/dev-login", { email: devEmail }))} className="btn-row">
                   <input id="dev-email" type="email" value={devEmail} onChange={(e) => setDevEmail(e.target.value)} placeholder="you@firm.com"
                     style={{ flex: 1 }} />
                   <button className="btn" disabled={busy || !devEmail}>Continue</button>
                 </form>
-                <label style={{ marginTop: 14 }}>Demo accounts (after running the seed script)</label>
-                <div className="pill-list">
-                  {DEMO.map((d) => (
-                    <button key={d.email} onClick={() => go("/v1/auth/dev-login", { email: d.email })} disabled={busy}>
-                      <strong>{d.role}</strong> · {d.email}
-                    </button>
-                  ))}
-                </div>
               </>
             )}
           </>

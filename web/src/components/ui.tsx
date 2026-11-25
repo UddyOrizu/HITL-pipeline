@@ -80,12 +80,12 @@ export function useLoad<T>(fn: () => Promise<T>, deps: unknown[] = []) {
 }
 
 export const ROLE_INFO: Record<string, { name: string; tone: string; blurb: string }> = {
-  admin: { name: "Admin", tone: "high", blurb: "Manages users, teams, workflows and integrations. Includes every other kind of access except reviewing." },
-  reviewer: { name: "Reviewer", tone: "accent", blurb: "Reviews assigned items. Measured by canaries, telemetry and spot-checks." },
-  submitter: { name: "Submitter", tone: "ok", blurb: "Sends work for review from the web app and tracks the decision. Never reviews their own work." },
-  oversight_lead: { name: "Oversight lead", tone: "medium", blurb: "Assurance dashboard, held items and workflow settings." },
-  auditor: { name: "Auditor", tone: "low", blurb: "Read-only evidence explorer and audit log." },
-  integration_owner: { name: "Integration owner", tone: "", blurb: "Source apps, API keys, webhooks and connectors." },
+  admin: { name: "Admin", tone: "high", blurb: "Looks after people, teams and settings. Can do everything except review work." },
+  reviewer: { name: "Reviewer", tone: "accent", blurb: "Reviews the work assigned to them. Their reviews are checked with planted mistakes, reading activity and spot checks." },
+  submitter: { name: "Submitter", tone: "ok", blurb: "Sends work for review and follows the decision. Never reviews their own work." },
+  oversight_lead: { name: "Oversight lead", tone: "medium", blurb: "Watches review quality, decides on work that is on hold and sets up review workflows." },
+  auditor: { name: "Auditor", tone: "low", blurb: "Can read review records and the activity log. Can't change anything." },
+  integration_owner: { name: "Integration owner", tone: "", blurb: "Sets up the apps and tools that send work here for review." },
 };
 
 export function RoleBadge({ role }: { role: string }) {

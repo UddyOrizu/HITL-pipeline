@@ -252,13 +252,13 @@ function UserEditor({ user, teams, people, selfId, canManage, allowAdminReviewer
               <p className="sub" style={{ fontSize: 13 }}>
                 Admins already have oversight, audit, integration and submit access.{" "}
                 {canAdminReview
-                  ? "An admin sets the canary rates, caps and thresholds, so by default they aren't given review work. Your organisation allows an admin to review as well, for when there is nobody else."
-                  : "They are never assigned review work: an admin sets the canary rates, caps and thresholds, so they shouldn't also be measured by them. To allow it, turn on \"Allow people to have both the admin and reviewer roles\" in Organisation settings."}
+                  ? "An admin sets how reviewers are checked, so by default they aren't given review work. Your organisation allows an admin to review as well, for when there is nobody else."
+                  : "They are never assigned review work: an admin sets how reviewers are checked, so they shouldn't also be checked by those rules. To allow it, turn on \"Allow people to have both the admin and reviewer roles\" in Settings › Organisation."}
               </p>
               {canAdminReview && (
                 <label className="check">
                   <input type="checkbox" checked={adminReviews} onChange={(e) => setAdminReviews(e.target.checked)} />
-                  <span><strong>Also a reviewer</strong> <span className="sub">Gets review work, measured by canaries, telemetry and spot-checks like any other reviewer.</span></span>
+                  <span><strong>Also a reviewer</strong> <span className="sub">Gets review work, checked with planted mistakes, reading activity and spot checks like any other reviewer.</span></span>
                 </label>
               )}
               {hadBoth && adminReviews && allowAdminReviewers === false && (
@@ -336,7 +336,7 @@ function UserEditor({ user, teams, people, selfId, canManage, allowAdminReviewer
                     <p style={{ margin: "0 0 8px" }}>
                       <strong>Erase the personal data of {user!.name || user!.email}?</strong> Their name, email, sign-in details and hourly
                       rate are removed and can't be recovered. Their review decisions stay in the record, attributed to an anonymised
-                      "Erased user" account. Earlier audit log entries are append-only and keep what they recorded at the time.
+                      "Erased user" account. Earlier activity log entries are append-only and keep what they recorded at the time.
                       The account can't be reactivated or edited afterwards.
                     </p>
                     <div className="btn-row">
@@ -559,7 +559,7 @@ export default function Users() {
     <>
       <div className="page-head">
         <div>
-          <h1>Users &amp; teams</h1>
+          <h1>People &amp; teams</h1>
           <div className="sub">Who can sign in to {me?.tenant?.name}, and what they can do.</div>
         </div>
         {canManage ? (
@@ -575,7 +575,7 @@ export default function Users() {
 
       <div className="grid grid-4" style={{ marginBottom: 16 }}>
         <Stat label="Admins" value={counts.admin}
-          hint={tenant.data?.allow_admin_reviewers ? "Run the platform. Review only if also given the reviewer role." : "Run the platform. Never assigned reviews."} />
+          hint={tenant.data?.allow_admin_reviewers ? "Look after people and settings. Review only if also given the reviewer role." : "Look after people and settings. Never assigned reviews."} />
         <Stat label="Reviewers" value={counts.reviewer} hint={`${active.reduce((n, u) => n + (u.stats?.open_tasks || 0), 0)} open tasks between them`} />
         <Stat label="Other staff" value={counts.staff} hint="Submitters, oversight, audit, integrations" />
         <Stat label="Deactivated" value={counts.inactive} hint="Kept for the audit trail" />
@@ -619,7 +619,7 @@ export default function Users() {
                       <div style={{ fontSize: 13 }}>
                         {u.stats.open_tasks} open · {u.stats.minutes_today} min today
                         <div className="sub" style={{ fontSize: 12 }}>
-                          Catch rate {u.stats.canaries_scored ? `${pct(u.stats.catch_rate)} (${u.stats.canaries_scored})` : "–"} · {u.stats.completed_30d} done in 30 days
+                          Mistakes caught {u.stats.canaries_scored ? `${pct(u.stats.catch_rate)} (${u.stats.canaries_scored})` : "–"} · {u.stats.completed_30d} done in 30 days
                         </div>
                       </div>
                     ) : <span className="sub">Not a reviewer</span>}

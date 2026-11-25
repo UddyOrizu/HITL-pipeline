@@ -1,0 +1,25 @@
+# The database for local runs without the rest of the Docker stack: Postgres + TimescaleDB on localhost:5432.
+# run.py starts and stops it (python run.py up / down); the API, worker, MCP server and web app run on the host.
+# By hand:           docker compose -f infra/docker-compose.dev.yml up -d --wait
+# Delete all data:   docker compose -f infra/docker-compose.dev.yml down -v
+#
+# Same image and owner as infra/docker-compose.yml, but its own project and volume, so the two never share data.
+# Both publish port 5432, so run one at a time.
+name: proof-of-review-dev
+
+services:
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    environment:
+      POSTGRES_USER: por
+      POSTGRES_PASSWORD: por
+      POSTGRES_DB: por
+    ports: ["127.0.0.1:5432:5432"] # this machine only
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U por -d por"]
+      interval: 2s
+      retries: 30
+
+volumes:
+  pgdata:

@@ -143,6 +143,8 @@ def _cases(t):
         ("PATCH", f"/v1/integrations/apps/{t['a']['app_id']}", "owner", {"name": "hijack"}),
         ("POST", f"/v1/integrations/apps/{t['a']['app_id']}/rotate-key", "owner", None),
         ("POST", f"/v1/integrations/apps/{t['a']['app_id']}/rotate-webhook-secret", "owner", None),
+        ("POST", f"/v1/integrations/apps/{t['a']['app_id']}/keys", "owner", {"name": "hijack"}),
+        ("DELETE", f"/v1/integrations/apps/{t['a']['app_id']}/keys/00000000-0000-0000-0000-000000000000", "owner", None),
         ("POST", f"/v1/integrations/deliveries/{t['delivery']}/redeliver", "owner", None),
         ("POST", "/v1/integrations/connectors", "owner", {"source_app_id": t["a"]["app_id"], "kind": "teams",
                                                           "config": {"webhook_url": "https://x.example.test"}}),

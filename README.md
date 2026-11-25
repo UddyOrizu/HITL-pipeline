@@ -12,19 +12,23 @@ Most approval tools record that someone clicked Approve. This one records whethe
 | Risk-pointing | Claim extraction and risk flags per span; high-risk flags must be acknowledged before Approve | [services/risk.py](services/risk.py), [agents/](agents/) |
 | Rotation and spot-checks | Round-robin, rotation and conflict rules; a weighted sample goes to a blind second reviewer, and disagreements are held for oversight | [services/workflow.py](services/workflow.py) |
 
-## Quick start (no Docker)
+## Quick start
 
-[run.py](run.py) runs the whole local stack. It works on Windows, macOS and Linux and only needs Python 3.11+ (plus Node.js for the web app):
+For a step-by-step guide, see [docs/running-locally.md](docs/running-locally.md). The one-command launchers [start-local.ps1](start-local.ps1) (Windows) and [start-local.sh](start-local.sh) (macOS, Linux) check that Python and Node.js are installed, apply any pending migrations, then run `python run.py up --seed`.
+
+[run.py](run.py) runs the whole local stack. It works on Windows, macOS and Linux and needs Python 3.11+, Docker for the Postgres database, and Node.js for the web app:
 
 ```bash
-python run.py up --seed     # create .venv, install deps, migrate, seed demo data (first run only), start everything
+python run.py up --seed     # create .venv, install deps, start Postgres, migrate, seed demo data (first run only), start everything
 python run.py status        # what is running, with URLs
 python run.py logs          # last 50 lines of every app's log; add -f to follow
-python run.py logs api -f   # follow one app (api, worker, mcp, web); several can be listed
+python run.py logs api -f   # follow one app (api, worker, mcp, web, db); several can be listed
 python run.py restart api   # restart one app
-python run.py down          # stop everything (or name apps: python run.py down web)
+python run.py down          # stop everything, including the database container (or name apps: python run.py down web)
 python run.py migrate       # migrations only
 ```
+
+The database is Postgres with TimescaleDB, in a container defined in [infra/docker-compose.dev.yml](infra/docker-compose.dev.yml) and published on `127.0.0.1:5432`. Migrations run as its owner (`por`); the apps connect as `por_app`, which is not a superuser, so row-level security applies locally as it does in production. Its data is kept in a Docker volume when the container stops. To use your own Postgres server, set `POR_DATABASE_URL` (the apps' role) and `POR_MIGRATION_DATABASE_URL` (the owner) in `.env`.
 
 Apps run in the background on API :8000, web :5173 and MCP :8001, and keep running after the command returns. Logs are in `var/logs/<app>.log` (the previous run's log is kept as `.log.1`). The MCP server starts when it has a credential: `POR_MCP_API_KEY` or `POR_MCP_REVIEWER_TOKEN` in `.env`, or the demo key written by `--seed`. `up` re-installs Python dependencies only when `pyproject.toml` changes, and web dependencies only when `package-lock.json` changes.
 
@@ -32,7 +36,10 @@ The same steps by hand:
 
 ```bash
 uv venv && uv pip install -e ".[all]" --group dev
-.venv/bin/alembic upgrade head
+docker compose -f infra/docker-compose.dev.yml up -d --wait   # Postgres on 127.0.0.1:5432
+POR_DATABASE_URL=postgresql+psycopg://por:por@127.0.0.1:5432/por .venv/bin/alembic upgrade head   # as the owner
+POR_DATABASE_URL=postgresql+psycopg://por:por@127.0.0.1:5432/por POR_APP_DB_USER=por_app POR_APP_DB_PASSWORD=por_app \
+  .venv/bin/python -m scripts.db_app_role       # the role the apps connect as (the default POR_DATABASE_URL)
 .venv/bin/python -m scripts.seed --submit      # demo tenant, 3 reviewers, 2 workflows, sample files in every format
 .venv/bin/uvicorn api.main:app --reload         # API on :8000
 
@@ -41,7 +48,7 @@ cd web && npm install && npm run dev            # reviewer app on :5173 (proxies
 
 Sign in at http://localhost:5173 with a seeded email: `admin@demo.test` (admin), `ada@demo.test`, `ben@demo.test` or `cara@demo.test` (reviewers), `sam@demo.test` (submitter), `olu@demo.test` (oversight lead), `aud@demo.test` (auditor), `ian@demo.test` (integration owner). The seed script prints the demo source app's API key.
 
-By default everything runs in one process with SQLite, local file storage and the offline `heuristic` risk engine. Set `POR_*` variables (see [.env.example](.env.example)) to switch on Postgres, Redis workers, S3/MinIO, LibreOffice and an LLM provider.
+By default the apps use that Postgres database, run jobs in-process, store files locally and use the offline `heuristic` risk engine. Set `POR_*` variables (see [.env.example](.env.example)) to switch on Redis workers, S3/MinIO, LibreOffice and an LLM provider. A `sqlite:///` URL in `POR_DATABASE_URL` still works for a quick run with no database server, without row-level security.
 
 ## Full stack (Docker)
 
@@ -165,7 +172,7 @@ Interactive docs are at `/docs`.
 
 **Keys**: rotating an API key can keep the old key working for a grace period (up to 7 days) while the app is redeployed. OAuth client credentials can be switched on or off, and their secret rotated, at any time; tokens already issued stop working at once. Lists return a plain JSON array with the total in `X-Total-Count` and the next page's offset in `X-Next-Offset`.
 
-**MCP server**: runs in one of two modes.
+**MCP server**: runs as a submitter, as a reviewer, or as both with one key.
 
 ```bash
 # Submitter mode: agents call the approval gate as a tool (source app API key)
@@ -175,13 +182,20 @@ POR_MCP_API_URL=http://localhost:8000 POR_MCP_API_KEY=por_... POR_MCP_HTTP_TOKEN
 
 # Reviewer mode: a named reviewer works their queue from an MCP client (an mcp token from the Account page)
 POR_MCP_API_URL=http://localhost:8000 POR_MCP_REVIEWER_TOKEN=<token> python -m mcp_server.server
+
+# Both on one server with one key: the source app key, once that app has been allowed to review (see below)
+POR_MCP_API_URL=http://localhost:8000 POR_MCP_API_KEY=por_... POR_MCP_REVIEW_WITH_API_KEY=true \
+  python -m mcp_server.server
 ```
 
 - **Submitter tools:** `submit_for_review`, `get_review_status`, `wait_for_decision` and `get_review_feedback`. Agents only ever see the decision, reasons and comments: never canaries, telemetry or reviewer identities.
 - **Reviewer tools:** `list_review_tasks`, `open_review_task` (the review copy as text with span ids and flags), `acknowledge_flag`, `add_review_comment` and `submit_review_decision`. Decisions are recorded under the reviewer's name, with channel `mcp`. The server's instructions tell the client that the human makes every decision.
-- **One mode per server:** it refuses to start with both a key and a token, so a single agent cannot submit work and then approve it.
+- **One credential per server:** it refuses to start with both a key and a token.
+- **Submitting and reviewing with one key:** off by default, because whoever holds the key can then submit work and approve it. To turn it on, choose a reviewer account for the source app's key to review as: `python -m scripts.app_key_review --reviewer <email> [--app <name>]`, or `review_as_user_id` on `PATCH /v1/integrations/apps/{id}` (integration owners; `null` turns it off). Then start the server with `POR_MCP_API_KEY` and `POR_MCP_REVIEW_WITH_API_KEY=true`: it offers all nine tools. The key works that reviewer's queue only. Decisions are recorded under that reviewer account with channel `mcp`, and each one adds a `decision.made_with_app_key` audit entry naming the app. The key stops reviewing as soon as the setting is cleared or the account is deactivated or loses the reviewer role. OAuth client tokens cannot review.
 - **Reviewer tokens:** a reviewer creates one on the Account page (*Reviewer access token (MCP)*, which calls `POST /v1/me/tokens {"channel": "mcp"}`). It records decisions as `mcp` whatever the client sends, expires after `POR_TOKEN_TTL_MINUTES` (12 hours by default) or at the end of the session it came from, and *Sign out everywhere* revokes it.
 - **Hosted (HTTP) mode:** every request needs `Authorization: Bearer $POR_MCP_HTTP_TOKEN`. The server refuses to start without it unless it listens on localhost only. `file_path` is turned off over HTTP, because it would read files on the server; send `file_base64` or `content` instead.
+
+**Test agent**: [scripts/demo_agent.py](scripts/demo_agent.py) is an Agno agent that drafts a short letter and submits it through the REST API, the MCP server or both (`python -m scripts.demo_agent --via api|mcp|both`), then checks with the API that the work arrived. It needs a real model provider. See [docs/running-locally.md](docs/running-locally.md#submit-with-the-test-agent).
 
 **Connectors** ([connectors/](connectors/)) sit on top of the same API:
 
@@ -268,8 +282,8 @@ Every report has a CSV export (`?format=csv`). The overview CSV is in long forma
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest                                    # SQLite, offline
-POR_TEST_DATABASE_URL=postgresql+psycopg://por:por@localhost:5432/por_test .venv/bin/python -m pytest   # real Postgres, via migrations with RLS
+.venv/bin/python -m pytest                                    # SQLite, offline (the tests' default; no Docker needed)
+POR_TEST_DATABASE_URL=postgresql+psycopg://por:por@127.0.0.1:5432/por_test .venv/bin/python -m pytest   # real Postgres, via migrations with RLS
 cd web && npm run typecheck
 ```
 
@@ -290,7 +304,7 @@ web/          React + TypeScript reviewer app
 db/           SQLAlchemy models, Alembic migrations (0002 adds RLS, audit trigger, Timescale hypertable)
 scripts/      seed script and sample-file generator
 tests/        pytest suites per milestone
-infra/        docker-compose, LibreOffice worker, Terraform (Azure)
+infra/        docker-compose (full stack, and docker-compose.dev.yml for the local database), LibreOffice worker, Terraform (Azure)
 ```
 
 ## Settings that matter in production

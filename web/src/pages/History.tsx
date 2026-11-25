@@ -26,8 +26,8 @@ export default function History() {
     <>
       <div className="page-head">
         <div>
-          <h1>My reviews</h1>
-          <div className="sub">Your own decisions, reading telemetry and canary results. You can always see what is measured about you.</div>
+          <h1>My past reviews</h1>
+          <div className="sub">Your decisions, how long you spent reading, and whether you spotted planted mistakes. You can always see what is measured about you.</div>
         </div>
       </div>
       {!!error && (
@@ -38,8 +38,8 @@ export default function History() {
       )}
       {canaries.length > 0 && (
         <div className="card" style={{ marginBottom: 16 }}>
-          <strong>Canary catch rate{paged ? " (decisions on this page)" : ""}:</strong> {caught} of {canaries.length} ({pct(caught / canaries.length)}).
-          Canaries are for calibration and coaching, not discipline.
+          <strong>Planted mistakes caught{paged ? " (decisions on this page)" : ""}:</strong> {caught} of {canaries.length} ({pct(caught / canaries.length)}).
+          Planted mistakes are deliberate errors added to some work to check it is being read carefully. They are used for coaching, not discipline.
         </div>
       )}
       <div className="card" style={{ padding: 0, overflowX: "auto", opacity: loading && data ? 0.6 : 1 }} aria-busy={loading}>
@@ -49,7 +49,7 @@ export default function History() {
           <Empty>{error ? "Your reviews couldn't be loaded." : offset > 0 ? "No more decisions." : "No decisions yet."}</Empty>
         ) : (
           <table>
-            <thead><tr><th>Decided</th><th>Kind</th><th>Outcome</th><th>Active / expected</th><th>Coverage</th><th>Flags</th><th>Canary</th></tr></thead>
+            <thead><tr><th>Decided</th><th>Kind</th><th>Outcome</th><th>Time spent / expected</th><th>Amount read</th><th>Warnings checked</th><th>Planted mistake</th></tr></thead>
             <tbody>
               {rows.map((r) => {
                 const t = r.telemetry || {};
@@ -61,7 +61,7 @@ export default function History() {
                     <td>{secs(t.active_seconds)} / {secs(t.expected_seconds)}</td>
                     <td>{pct(t.coverage)}</td>
                     <td>{t.flags_total != null ? `${t.flags_acknowledged ?? 0}/${t.flags_total}` : "–"}</td>
-                    <td>{r.canary ? <Badge tone={r.canary.caught ? "ok" : "medium"}>{r.canary.caught ? "caught" : "missed"} · {label(r.canary.type)}</Badge> : "–"}</td>
+                    <td>{r.canary ? <Badge tone={r.canary.caught ? "ok" : "medium"}>{r.canary.caught ? "spotted" : "missed"} · {label(r.canary.type)}</Badge> : "–"}</td>
                   </tr>
                 );
               })}

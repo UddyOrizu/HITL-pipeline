@@ -1,10 +1,12 @@
 """MCP tool implementations: a thin layer over the REST API (one source of truth for logic).
 
-Two modes, never both in one server:
+Two credentials, never both in one server:
 - submitter (POR_MCP_API_KEY, a source app key): submit work and wait for the decision. The agent only ever sees
   the decision, reasons and comments: never canaries, telemetry or reviewer identities.
 - reviewer (POR_MCP_REVIEWER_TOKEN, a reviewer's sign-in token): a named human reviewer works their queue from an
   MCP client. They see the review copy, exactly as in the web workspace.
+With POR_MCP_REVIEW_WITH_API_KEY=true the reviewer tools use the source app key instead, so one key does both. The
+API only accepts that when the source app has been given a reviewer account to review as.
 """
 
 from __future__ import annotations
@@ -36,9 +38,15 @@ def default_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(base_url=base, headers={"X-API-Key": key, **CHANNEL}, timeout=60)
 
 
+def review_with_api_key() -> bool:
+    return os.environ.get("POR_MCP_REVIEW_WITH_API_KEY", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def default_reviewer_client() -> httpx.AsyncClient:
     base = os.environ.get("POR_MCP_API_URL", "http://localhost:8000")
     token = os.environ.get("POR_MCP_REVIEWER_TOKEN")
+    if not token and review_with_api_key():
+        return default_client()  # one key for both: the API maps the source app key to its reviewer account
     if not token:
         raise RuntimeError("POR_MCP_REVIEWER_TOKEN must be set to a reviewer's sign-in token")
     return httpx.AsyncClient(base_url=base, headers={"Authorization": f"Bearer {token}", **CHANNEL}, timeout=60)

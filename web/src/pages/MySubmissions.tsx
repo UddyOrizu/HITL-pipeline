@@ -93,8 +93,8 @@ export default function MySubmissions() {
     <>
       <div className="page-head">
         <div>
-          <h1>My submissions</h1>
-          <div className="sub">Work you've sent for review, with the decision and evidence once it's released.</div>
+          <h1>Sent by me</h1>
+          <div className="sub">Work you've sent for review, with the decision and the review record once it's released.</div>
         </div>
         <div className="btn-row">
           <select aria-label="Filter by status" value={status} style={{ width: 190 }}
@@ -103,7 +103,7 @@ export default function MySubmissions() {
             {STATUSES.map((st) => <option key={st} value={st}>{label(st)}</option>)}
           </select>
           <button className="btn" onClick={reload} disabled={loading}>{loading && data ? "Refreshing…" : "Refresh"}</button>
-          <Link className="btn primary" to="/submit">Submit for review</Link>
+          <Link className="btn primary" to="/submit">Send for review</Link>
         </div>
       </div>
       {fresh && <div className="success">Submitted. It's been routed to a reviewer.</div>}
@@ -136,7 +136,7 @@ export default function MySubmissions() {
                     </td>
                     <td>
                       {s.decision ? label(s.decision.outcome) : <span className="sub">Waiting</span>}
-                      {s.decision?.assurance?.score != null && <div className="sub" style={{ fontSize: 12 }}>Assurance score {s.decision.assurance.score}</div>}
+                      {s.decision?.assurance?.score != null && <div className="sub" style={{ fontSize: 12 }}>Review quality score {s.decision.assurance.score}</div>}
                     </td>
                     <td className="sub">{when(s.created_at)}</td>
                     <td style={{ textAlign: "right" }} onClick={(e) => e.stopPropagation()}>
